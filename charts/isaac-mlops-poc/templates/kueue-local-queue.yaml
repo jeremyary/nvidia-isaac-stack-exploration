@@ -1,6 +1,6 @@
 # This project was developed with assistance from AI tools.
 {{- if .Values.kueue.enabled }}
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
 metadata:
   name: isaac-queue

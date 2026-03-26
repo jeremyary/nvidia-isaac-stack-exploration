@@ -60,6 +60,11 @@ spec:
           value: {{ .Values.modelRegistry.database.name }}
         ports:
         - containerPort: 5432
+        readinessProbe:
+          exec:
+            command: ["pg_isready", "-U", "{{ .Values.modelRegistry.database.user }}"]
+          initialDelaySeconds: 5
+          periodSeconds: 5
         volumeMounts:
         - name: data
           mountPath: /var/lib/pgsql/data

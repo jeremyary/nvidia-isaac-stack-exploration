@@ -16,6 +16,9 @@ spec:
       containers:
       - name: mc
         image: {{ .Values.minio.mcImage }}
+        env:
+        - name: HOME
+          value: /tmp
         command: ["/bin/sh", "-c"]
         args:
         - |
