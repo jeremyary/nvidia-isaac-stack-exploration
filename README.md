@@ -68,6 +68,26 @@ python pipelines/isaac_training_pipeline.py
 | `nvcr.io/nvidia/isaac-sim:4.5.0` | Synthetic data generation (Replicator) | ~15GB |
 | `nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf1.15.5` | TFRecord conversion + DetectNet_v2 training | ~8GB |
 
+## Parameter Sweep
+
+To populate MLflow with comparison data across different configurations, run the parameter sweep script. This submits 5 pipeline runs sequentially, varying `num_frames`, `epochs`, and `batch_size`:
+
+```bash
+python pipelines/parameter_sweep.py
+```
+
+Runs are submitted one at a time because the data and model PVCs are `ReadWriteOnce` — only one pipeline run can mount them at a time. Each run goes through the full pipeline (data generation → TFRecord conversion → training → evaluation), so **expect the full sweep to take several hours**. Isaac Sim synthetic data generation is the bottleneck — the container is ~15GB and GPU rendering is compute-intensive even for small frame counts.
+
+| Run | num_frames | epochs | batch_size |
+|-----|-----------|--------|------------|
+| baseline | 100 | 2 | 4 |
+| more-frames | 200 | 2 | 4 |
+| larger-batch | 100 | 2 | 8 |
+| more-epochs | 100 | 4 | 4 |
+| combined | 200 | 4 | 8 |
+
+Results are logged to MLflow under the `palletjack-parameter-sweep` experiment for side-by-side comparison.
+
 ## Screenshots
 
 ### Pipeline Definitions

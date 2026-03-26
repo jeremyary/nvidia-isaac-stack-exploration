@@ -7,6 +7,7 @@
 # the migration fails partway and marks schema_migrations as dirty.
 # This hook runs after install, waits for stability, and clears the
 # dirty flag so the registry server can retry successfully.
+# Times out after 5 minutes with a clear error.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -17,8 +18,9 @@ metadata:
   annotations:
     helm.sh/hook: post-install
     helm.sh/hook-weight: "10"
-    helm.sh/hook-delete-policy: hook-succeeded
+    helm.sh/hook-delete-policy: hook-succeeded,before-hook-creation
 spec:
+  activeDeadlineSeconds: 300
   template:
     spec:
       containers:
@@ -38,8 +40,15 @@ spec:
         command: ["/bin/bash", "-c"]
         args:
         - |
-          echo "Waiting for Postgres to accept queries..."
-          until psql -c "SELECT 1" >/dev/null 2>&1; do
+          echo "Waiting for Postgres to accept queries (timeout: 5m)..."
+          for i in $(seq 1 100); do
+            if psql -c "SELECT 1" >/dev/null 2>&1; then
+              break
+            fi
+            if [ "$i" -eq 100 ]; then
+              echo "ERROR: Postgres not reachable after 5 minutes"
+              exit 1
+            fi
             sleep 3
           done
           echo "Postgres ready"

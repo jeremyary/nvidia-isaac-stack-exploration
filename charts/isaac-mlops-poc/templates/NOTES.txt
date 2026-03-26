@@ -1,11 +1,26 @@
 Isaac MLOps PoC deployed to namespace: {{ include "isaac-mlops.namespace" . }}
 
 === Post-install steps ===
+{{- if not .Values.ngc.apiKey }}
 
-1. Link NGC pull secret to the DSPA pipeline runner SA:
+1. Create NGC secrets and link to the pipeline runner SA:
 
+   source .env
+   oc create secret docker-registry ngc-secret \
+     --docker-server=nvcr.io --docker-username='$oauthtoken' \
+     --docker-password="$NGC_API_KEY" --docker-email="{{ .Values.ngc.email }}" \
+     -n {{ include "isaac-mlops.namespace" . }}
+   oc create secret generic ngc-api-key \
+     --from-literal=NGC_API_KEY="$NGC_API_KEY" \
+     -n {{ include "isaac-mlops.namespace" . }}
    oc secrets link pipeline-runner-isaac-pipelines ngc-secret \
      --for=pull -n {{ include "isaac-mlops.namespace" . }}
+
+   Tip: pass --set ngc.apiKey=<key> at install time to automate this.
+{{- else }}
+
+1. NGC secrets created and linked automatically (ngc.apiKey was provided).
+{{- end }}
 
 2. Verify infrastructure is ready:
 
