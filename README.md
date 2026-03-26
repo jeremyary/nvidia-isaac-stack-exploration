@@ -1,4 +1,4 @@
-[# NVIDIA Isaac MLOps PoC
+# NVIDIA Isaac MLOps PoC
 
 Automated MLOps pipeline for NVIDIA's synthetic data generation and model training workflow, running on OpenShift AI (RHOAI 3.3).
 
