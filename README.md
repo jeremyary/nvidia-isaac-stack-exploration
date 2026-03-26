@@ -14,21 +14,6 @@ Isaac Sim (generate synthetic palletjack images)
 
 All orchestrated by Data Science Pipelines (KFP v2) on OpenShift with GPU scheduling via the NVIDIA GPU Operator.
 
-## Repository Structure
-
-```
-charts/isaac-mlops-poc/    Helm chart — deploys all infrastructure
-  templates/                 MinIO, DSPA, MLflow, PVCs, RBAC, TAO specs, test Jobs
-  values.yaml                All tunables (GPU type, frame count, epochs, etc.)
-
-pipelines/
-  isaac_training_pipeline.py   5-step KFP v2 pipeline definition (compile + upload)
-  test_pipeline.py             Smoke test to verify DSPA is functional
-
-planning/                  PoC plan, phase results, architecture decisions
-notes/                     Detailed walkthrough of how everything works
-```
-
 ## Prerequisites
 
 - OpenShift 4.x with RHOAI 3.3+ (DSPA, MLflow operator, Kueue)
