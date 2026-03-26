@@ -1,0 +1,117 @@
+# Namespace for all resources
+namespace: isaac-mlops-poc
+
+# NGC container registry credentials
+ngc:
+  # API key for pulling images and runtime authentication
+  # Set via --set ngc.apiKey=<key> or values file override
+  apiKey: ""
+  email: "jary@redhat.com"
+
+# GPU scheduling
+gpu:
+  product: NVIDIA-L40S
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+
+# Storage
+storage:
+  storageClassName: gp3
+  syntheticData:
+    size: 50Gi
+  modelArtifacts:
+    size: 20Gi
+  workspace:
+    size: 2Gi
+  tfrecords:
+    size: 2Gi
+
+# MinIO object storage (for DSPA + MLflow artifacts)
+minio:
+  image: quay.io/minio/minio:latest
+  mcImage: quay.io/minio/mc:latest
+  storage:
+    size: 50Gi
+  credentials:
+    user: minio
+    password: minio123  # PoC only
+  buckets:
+    - mlpipeline
+    - mlflow
+
+# Data Science Pipelines Application
+dspa:
+  enabled: true
+  dspVersion: v2
+  database:
+    pvcSize: 10Gi
+
+# MLflow tracking server (RHOAI-managed, cluster-scoped singleton)
+mlflow:
+  enabled: true
+  replicas: 1
+  # MLflow operator deploys pods in this namespace
+  operatorNamespace: redhat-ods-applications
+  # Internal service URI for pipeline steps (no /mlflow suffix — that's for the gateway route)
+  # Requires: MLFLOW_TRACKING_INSECURE_TLS=true, SA token auth, X-MLFLOW-WORKSPACE header
+  trackingUri: "https://mlflow.redhat-ods-applications.svc:8443"
+  storage:
+    size: 5Gi
+
+# Kueue LocalQueue
+kueue:
+  enabled: true
+  clusterQueue: default
+
+# Isaac Sim data generation
+isaacSim:
+  enabled: true
+  # Set to true to deploy the standalone validation Job (Phase 1 testing)
+  testJob: false
+  image: nvcr.io/nvidia/isaac-sim:4.5.0
+  sdgRepo: https://github.com/NVIDIA-AI-IOT/synthetic_data_generation_training_workflow.git
+  gitImage: alpine/git:latest
+  resources:
+    limits:
+      gpu: 1
+      memory: 32Gi
+      cpu: "8"
+    requests:
+      gpu: 1
+      memory: 16Gi
+      cpu: "4"
+  # Data generation parameters
+  datagen:
+    numFrames: 100
+    height: 544
+    width: 960
+    distractors: warehouse
+
+# TAO Toolkit training
+tao:
+  enabled: true
+  # Set to true to deploy the standalone validation Job (Phase 1 testing)
+  testJob: false
+  image: nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf1.15.5
+  resources:
+    limits:
+      gpu: 1
+      memory: 32Gi
+      cpu: "8"
+    requests:
+      gpu: 1
+      memory: 16Gi
+      cpu: "4"
+  # Training parameters
+  training:
+    epochs: 2
+    batchSize: 4
+    arch: resnet
+    numLayers: 18
+    pretrainedModelUrl: "https://api.ngc.nvidia.com/v2/models/nvidia/tao/pretrained_detectnet_v2/versions/resnet18/files/resnet18.hdf5"
+    encryptionKey: tao_key
+    # Learning rate schedule
+    minLearningRate: 5e-06
+    maxLearningRate: 5e-04

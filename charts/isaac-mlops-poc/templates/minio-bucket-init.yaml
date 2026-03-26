@@ -1,0 +1,31 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-bucket-init
+  namespace: {{ include "isaac-mlops.namespace" . }}
+  labels:
+    {{- include "isaac-mlops.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "1"
+    helm.sh/hook-delete-policy: hook-succeeded
+spec:
+  template:
+    spec:
+      containers:
+      - name: mc
+        image: {{ .Values.minio.mcImage }}
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          echo "Waiting for MinIO to be ready..."
+          until mc alias set local http://minio.{{ include "isaac-mlops.namespace" . }}.svc:9000 {{ .Values.minio.credentials.user }} {{ .Values.minio.credentials.password }} 2>/dev/null; do
+            echo "MinIO not ready, retrying in 5s..."
+            sleep 5
+          done
+          {{- range .Values.minio.buckets }}
+          mc mb local/{{ . }} --ignore-existing
+          {{- end }}
+          echo "Buckets created successfully"
+      restartPolicy: Never
+  backoffLimit: 5

@@ -1,0 +1,29 @@
+Isaac MLOps PoC deployed to namespace: {{ include "isaac-mlops.namespace" . }}
+
+=== Post-install steps ===
+
+1. Link NGC pull secret to the DSPA pipeline runner SA:
+
+   oc secrets link pipeline-runner-isaac-pipelines ngc-secret \
+     --for=pull -n {{ include "isaac-mlops.namespace" . }}
+
+2. Verify infrastructure is ready:
+
+   oc get pods -n {{ include "isaac-mlops.namespace" . }}
+   # Expected: minio, mariadb-*, ds-pipeline-* pods Running
+
+3. Compile and upload the pipeline:
+
+   python pipelines/isaac_training_pipeline.py
+   # Upload pipelines/isaac_training_pipeline.yaml via the RHOAI dashboard
+
+=== MLflow access ===
+
+  UI:       https://data-science-gateway.<cluster-domain>/mlflow
+  Internal: {{ .Values.mlflow.trackingUri }} (for pipeline steps)
+
+=== Key resources ===
+
+  PVCs:     synthetic-data ({{ .Values.storage.syntheticData.size }}), model-artifacts ({{ .Values.storage.modelArtifacts.size }}), tfrecords ({{ .Values.storage.tfrecords.size }})
+  MinIO:    http://minio.{{ include "isaac-mlops.namespace" . }}.svc:9000
+  Buckets:  {{ join ", " .Values.minio.buckets }}

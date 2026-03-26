@@ -1,0 +1,55 @@
+{{- if .Values.dspa.enabled }}
+# Grant anyuid SCC to the DSPA pipeline runner SA.
+# NVIDIA containers (Isaac Sim, TAO Toolkit) require root access.
+# The SA name follows the DSPA naming convention: pipeline-runner-<dspa-name>
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "isaac-mlops.namespace" . }}-pipeline-anyuid
+  labels:
+    {{- include "isaac-mlops.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:openshift:scc:anyuid
+subjects:
+- kind: ServiceAccount
+  name: pipeline-runner-isaac-pipelines
+  namespace: {{ include "isaac-mlops.namespace" . }}
+{{- if .Values.mlflow.enabled }}
+---
+# MLflow edit permissions — allows pipeline steps to create experiments,
+# log runs, and register models via RHOAI MLflow K8s workspace auth.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "isaac-mlops.namespace" . }}-pipeline-mlflow-edit
+  labels:
+    {{- include "isaac-mlops.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mlflow-operator-mlflow-edit
+subjects:
+- kind: ServiceAccount
+  name: pipeline-runner-isaac-pipelines
+  namespace: {{ include "isaac-mlops.namespace" . }}
+---
+# MLflow view permissions — allows pipeline steps to read experiments
+# and model registry via RHOAI MLflow K8s workspace auth.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "isaac-mlops.namespace" . }}-pipeline-mlflow-view
+  labels:
+    {{- include "isaac-mlops.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mlflow-operator-mlflow-view
+subjects:
+- kind: ServiceAccount
+  name: pipeline-runner-isaac-pipelines
+  namespace: {{ include "isaac-mlops.namespace" . }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: isaac-mlops-poc
+description: MLOps infrastructure for NVIDIA Isaac Sim + TAO Toolkit on OpenShift
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

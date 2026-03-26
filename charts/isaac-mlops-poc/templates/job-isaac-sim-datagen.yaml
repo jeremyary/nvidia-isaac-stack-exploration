@@ -1,0 +1,101 @@
+{{- if and .Values.isaacSim.enabled .Values.isaacSim.testJob }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: test-isaac-sim-datagen
+  namespace: {{ include "isaac-mlops.namespace" . }}
+  labels:
+    {{- include "isaac-mlops.labels" . | nindent 4 }}
+spec:
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app: isaac-sim-datagen
+    spec:
+      imagePullSecrets:
+      - name: ngc-secret
+      serviceAccountName: default
+      securityContext:
+        runAsUser: 0
+        fsGroup: 0
+      initContainers:
+      - name: clone-sdg-repo
+        image: {{ .Values.isaacSim.gitImage }}
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          git clone --depth 1 {{ .Values.isaacSim.sdgRepo }} /workspace/sdg
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+      containers:
+      - name: isaac-sim
+        image: {{ .Values.isaacSim.image }}
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          echo "=== Starting Isaac Sim headless datagen ==="
+          echo "GPU info:"
+          nvidia-smi
+          echo "=== Running Replicator SDG script ==="
+          cd /workspace/sdg/palletjack_sdg
+          /isaac-sim/python.sh standalone_palletjack_sdg.py \
+            --headless True \
+            --height {{ .Values.isaacSim.datagen.height }} \
+            --width {{ .Values.isaacSim.datagen.width }} \
+            --num_frames {{ .Values.isaacSim.datagen.numFrames }} \
+            --distractors {{ .Values.isaacSim.datagen.distractors }} \
+            --data_dir /output/palletjack_data/{{ .Values.isaacSim.datagen.distractors }}
+          EXIT_CODE=$?
+          echo "=== Data generation exit code: $EXIT_CODE ==="
+          echo "Output contents:"
+          find /output/palletjack_data/ -type f 2>/dev/null | head -20 || echo "No output files found"
+          exit $EXIT_CODE
+        env:
+        - name: ACCEPT_EULA
+          value: "Y"
+        - name: PRIVACY_CONSENT
+          value: "Y"
+        resources:
+          limits:
+            nvidia.com/gpu: {{ .Values.isaacSim.resources.limits.gpu }}
+            memory: {{ .Values.isaacSim.resources.limits.memory }}
+            cpu: {{ .Values.isaacSim.resources.limits.cpu | quote }}
+          requests:
+            nvidia.com/gpu: {{ .Values.isaacSim.resources.requests.gpu }}
+            memory: {{ .Values.isaacSim.resources.requests.memory }}
+            cpu: {{ .Values.isaacSim.resources.requests.cpu | quote }}
+        volumeMounts:
+        - name: output
+          mountPath: /output
+        - name: workspace
+          mountPath: /workspace
+        - name: cache
+          mountPath: /isaac-sim/kit/cache
+        - name: glcache
+          mountPath: /root/.cache/nvidia/GLCache
+        - name: computecache
+          mountPath: /root/.nv/ComputeCache
+        - name: omniverse
+          mountPath: /.nvidia-omniverse
+      nodeSelector:
+        {{- include "isaac-mlops.gpuNodeSelector" . | nindent 8 }}
+      tolerations:
+        {{- include "isaac-mlops.gpuTolerations" . | nindent 8 }}
+      restartPolicy: Never
+      volumes:
+      - name: output
+        persistentVolumeClaim:
+          claimName: synthetic-data
+      - name: workspace
+        emptyDir: {}
+      - name: cache
+        emptyDir: {}
+      - name: glcache
+        emptyDir: {}
+      - name: computecache
+        emptyDir: {}
+      - name: omniverse
+        emptyDir: {}
+{{- end }}
