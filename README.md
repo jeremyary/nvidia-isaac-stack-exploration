@@ -2,21 +2,23 @@
 
 Automated MLOps pipeline for NVIDIA's synthetic data generation and model training workflow, running on OpenShift AI (RHOAI 3.3).
 
-Takes the manual process from NVIDIA's Isaac [Sim Module 3](https://docs.nvidia.com/learning/physical-ai/getting-started-with-isaac-sim/latest/synthetic-data-generation-for-perception-model-training-in-isaac-sim/index.html) — generate synthetic images, convert annotations, train an object detection model, evaluate results — and wraps it in a single parameterized pipeline with experiment tracking and model registration.
+Takes the manual process from NVIDIA's Isaac [Sim Module 3](https://docs.nvidia.com/learning/physical-ai/getting-started-with-isaac-sim/latest/synthetic-data-generation-for-perception-model-training-in-isaac-sim/index.html) — generate synthetic images, convert annotations, train an object detection model, evaluate results — and wraps it in a single parameterized pipeline with experiment tracking, model registration, and live inference serving.
 
 > [!NOTE]
 > This project was developed with assistance from AI tools.
-> 
+>
 ## What It Does
 
 ```
 Isaac Sim (generate synthetic palletjack images)
   → TAO Toolkit (convert to TFRecords)
     → Kubeflow Trainer (train DetectNet_v2 as a TrainJob)
-      → MLflow + Model Registry (log metrics, register model if mAP > threshold)
+      → TAO Export (HDF5 → ONNX)
+        → MLflow + Model Registry (log metrics, upload ONNX to S3, register model)
+          → KServe InferenceService (deploy ONNX model via OVMS)
 ```
 
-All orchestrated by Data Science Pipelines (KFP v2) on OpenShift AI with GPU scheduling via the NVIDIA GPU Operator. Training jobs are visible in the RHOAI Training Jobs dashboard.
+All orchestrated by Data Science Pipelines (KFP v2) on OpenShift AI with GPU scheduling via the NVIDIA GPU Operator. Training jobs are visible in the RHOAI Training Jobs dashboard. The trained model is automatically exported to ONNX and deployed as a live inference endpoint via OpenVINO Model Server (OVMS).
 
 ## Prerequisites
 
@@ -59,6 +61,8 @@ python pipelines/isaac_training_pipeline.py
 | `batch_size` | 4 | Images per GPU batch |
 | `training_runtime` | tao-detectnet | ClusterTrainingRuntime for Kubeflow Trainer |
 | `map_threshold` | 0.0 | Minimum mAP to register the model |
+| `serving_runtime` | ovms | ServingRuntime: `ovms` (CPU) or `triton` (GPU) |
+| `s3_model_bucket` | models | MinIO bucket for KServe model repository |
 | `gpu.product` | NVIDIA-L40S | GPU node selector label |
 
 ## NVIDIA Container Images
@@ -109,6 +113,7 @@ The chart creates the following bindings, all scoped to the `pipeline-runner-isa
 | `kueue-trainjob-editor-role` | Namespace | Create/monitor TrainJob resources |
 | `cluster-training-runtime-reader` | Cluster | Look up ClusterTrainingRuntime for TrainJobs |
 | `training-runtime-reader` | Namespace | Kubeflow SDK checks namespace-scoped TrainingRuntimes first; without read access the lookup returns 403 (not 404), preventing fallthrough to cluster scope |
+| `inferenceservice-manager` | Namespace | Pipeline step creates/updates KServe InferenceService for model deployment |
 
 ### Cross-namespace resources
 
@@ -117,6 +122,25 @@ The Model Registry components (Postgres, Secret, PVC, ModelRegistry CR) are depl
 ### GPU resource management
 
 GPU allocation is managed by Kueue rather than namespace ResourceQuotas. The ClusterQueue defines nominal GPU quotas, and the LocalQueue in the project namespace gates workload admission. All GPU containers specify explicit resource requests and limits for `nvidia.com/gpu`, `cpu`, and `memory`.
+
+## Model Serving
+
+The pipeline automatically deploys the trained model as a KServe InferenceService. The ONNX model is uploaded to MinIO and served via the V2 inference protocol. The default runtime is OVMS (OpenVINO Model Server) for CPU inference; a Triton ServingRuntime is also included in the chart for GPU-accelerated inference if needed.
+
+An optional API key gateway secures the external inference endpoint:
+
+```bash
+helm upgrade isaac-mlops charts/isaac-mlops-poc/ \
+  --set serving.auth.enabled=true -n isaac-mlops-poc
+
+# Retrieve the auto-generated API key
+oc get secret inference-api-key -n isaac-mlops-poc \
+  -o jsonpath='{.data.api-key}' | base64 -d
+
+# Test the endpoint
+curl -H "X-API-Key: <key>" \
+  https://inference-gateway-isaac-mlops-poc.apps.<cluster-domain>/v2/models/palletjack-detectnet-v2
+```
 
 ## Screenshots
 
