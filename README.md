@@ -1,8 +1,8 @@
-# NVIDIA Isaac MLOps PoC
+[# NVIDIA Isaac MLOps PoC
 
 Automated MLOps pipeline for NVIDIA's synthetic data generation and model training workflow, running on OpenShift AI (RHOAI 3.3).
 
-Takes the manual, multi-hour process from NVIDIA's Isaac Sim Module 3 — generate synthetic images, convert annotations, train an object detection model, evaluate results — and wraps it in a single parameterized pipeline with experiment tracking and model registration.
+Takes the manual process from NVIDIA's Isaac [Sim Module 3](https://docs.nvidia.com/learning/physical-ai/getting-started-with-isaac-sim/latest/synthetic-data-generation-for-perception-model-training-in-isaac-sim/index.html) — generate synthetic images, convert annotations, train an object detection model, evaluate results — and wraps it in a single parameterized pipeline with experiment tracking and model registration.
 
 ## What It Does
 
@@ -81,3 +81,4 @@ python pipelines/isaac_training_pipeline.py
 ## Documentation
 
 See [`notes/mlops-poc-walkthrough.md`](notes/mlops-poc-walkthrough.md) for a detailed explanation of every component, how data flows between pipeline steps, and what all the ML concepts mean.
+](https://docs.nvidia.com/learning/physical-ai/getting-started-with-isaac-sim/latest/synthetic-data-generation-for-perception-model-training-in-isaac-sim/index.html)
