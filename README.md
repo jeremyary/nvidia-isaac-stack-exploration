@@ -80,5 +80,4 @@ python pipelines/isaac_training_pipeline.py
 
 ## Documentation
 
-See [`notes/mlops-poc-walkthrough.md`](notes/mlops-poc-walkthrough.md) for a detailed explanation of every component, how data flows between pipeline steps, and what all the ML concepts mean.
-](https://docs.nvidia.com/learning/physical-ai/getting-started-with-isaac-sim/latest/synthetic-data-generation-for-perception-model-training-in-isaac-sim/index.html)
+See [`notes/mlops-poc-walkthrough.md`](notes/mlops-poc-walkthrough.md) for explanation of components, data flow, and ML concepts.
