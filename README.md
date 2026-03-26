@@ -65,7 +65,3 @@ python pipelines/isaac_training_pipeline.py
 |-------|---------|------|
 | `nvcr.io/nvidia/isaac-sim:4.5.0` | Synthetic data generation (Replicator) | ~15GB |
 | `nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf1.15.5` | TFRecord conversion + DetectNet_v2 training | ~8GB |
-
-## Documentation
-
-See [`notes/mlops-poc-walkthrough.md`](notes/mlops-poc-walkthrough.md) for explanation of components, data flow, and ML concepts.
