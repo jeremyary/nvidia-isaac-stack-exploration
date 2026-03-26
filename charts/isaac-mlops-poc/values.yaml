@@ -151,3 +151,24 @@ serving:
     # API key — auto-generated on first install if left empty.
     # Retrieve with: oc get secret inference-api-key -n <ns> -o jsonpath='{.data.api-key}' | base64 -d
     apiKey: ""
+
+# Cosmos Transfer sim-to-real augmentation (Phase 2)
+cosmosTransfer:
+  enabled: false
+  image: nvcr.io/nim/nvidia/cosmos-transfer2.5-2b:1.0.0
+  prepImage: quay.io/jary/cosmos-prep:latest
+  clipLength: 25
+  prompt: "Industrial warehouse, bright overhead fluorescent lighting, concrete floor"
+  edgeWeight: 1.0
+  depthWeight: 0.25
+  segWeight: 0.25
+  resources:
+    limits:
+      gpu: 1
+      memory: 48Gi
+      cpu: "8"
+    requests:
+      gpu: 1
+      memory: 32Gi
+      cpu: "4"
+  shmSize: 32Gi

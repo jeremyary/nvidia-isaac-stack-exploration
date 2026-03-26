@@ -20,12 +20,30 @@ data:
       num_shards: 10
     }
     image_directory_path: "/workspace/data/palletjack_data/warehouse/Camera"
+{{- if .Values.cosmosTransfer.enabled }}
+  tfrecords_warehouse_merged.txt: |
+    kitti_config {
+      root_directory_path: "/workspace/data/palletjack_data_merged/warehouse/Camera"
+      image_dir_name: "rgb"
+      label_dir_name: "object_detection"
+      image_extension: ".png"
+      partition_mode: "random"
+      num_partitions: 2
+      val_split: 10
+      num_shards: 10
+    }
+    image_directory_path: "/workspace/data/palletjack_data_merged/warehouse/Camera"
+{{- end }}
   training_resnet18.txt: |
     random_seed: 42
     dataset_config {
       data_sources {
         tfrecords_path: "/workspace/tfrecords/warehouse/*"
+{{- if .Values.cosmosTransfer.enabled }}
+        image_directory_path: "/workspace/data/palletjack_data_merged/warehouse/Camera"
+{{- else }}
         image_directory_path: "/workspace/data/palletjack_data/warehouse/Camera"
+{{- end }}
       }
       image_extension: "png"
       target_class_mapping {

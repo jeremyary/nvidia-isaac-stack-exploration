@@ -35,6 +35,12 @@ Isaac MLOps PoC deployed to namespace: {{ include "isaac-mlops.namespace" . }}
 
    python pipelines/isaac_training_pipeline.py
    # Upload pipelines/isaac_training_pipeline.yaml via the RHOAI dashboard
+{{- if .Values.cosmosTransfer.enabled }}
+
+   # Cosmos-augmented pipeline (sim-to-real):
+   python pipelines/isaac_cosmos_pipeline.py
+   # Upload pipelines/isaac_cosmos_pipeline.yaml via the RHOAI dashboard
+{{- end }}
 
 === MLflow access ===
 
@@ -78,6 +84,19 @@ Isaac MLOps PoC deployed to namespace: {{ include "isaac-mlops.namespace" . }}
   Internal only:
     curl http://palletjack-detectnet-v2-predictor.{{ include "isaac-mlops.namespace" . }}.svc.cluster.local:8888/v2/models/palletjack-detectnet-v2
 {{- end }}
+{{- end }}
+
+{{- if .Values.cosmosTransfer.enabled }}
+=== Cosmos Transfer Augmentation ===
+
+  NIM image:  {{ .Values.cosmosTransfer.image }}
+  Prep image: {{ .Values.cosmosTransfer.prepImage }}
+  Prompt:     {{ .Values.cosmosTransfer.prompt }}
+  Weights:    edge={{ .Values.cosmosTransfer.edgeWeight }}, depth={{ .Values.cosmosTransfer.depthWeight }}, seg={{ .Values.cosmosTransfer.segWeight }}
+
+  Compile and upload the Cosmos pipeline:
+    python pipelines/isaac_cosmos_pipeline.py
+    # Upload pipelines/isaac_cosmos_pipeline.yaml via the RHOAI dashboard
 {{- end }}
 
 === Key resources ===

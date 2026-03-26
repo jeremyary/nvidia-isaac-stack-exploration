@@ -1,12 +1,17 @@
 # PIPELINE DEFINITION
-# Name: isaac-synth-train-serve
-# Description: Synthetic data generation with Isaac Sim Replicator, model training with TAO DetectNet_v2, ONNX export, experiment tracking + model registration with MLflow, and deployment as a KServe InferenceService.
+# Name: isaac-cosmos-synth-train-serve
+# Description: Synthetic data generation with Isaac Sim Replicator, Cosmos Transfer2.5 sim-to-real augmentation, model training with TAO DetectNet_v2, ONNX export, experiment tracking + model registration with MLflow, and deployment as a KServe InferenceService.
 # Inputs:
 #    batch_size: int [Default: 4.0]
+#    cosmos_clip_length: int [Default: 25.0]
+#    cosmos_depth_weight: float [Default: 0.25]
+#    cosmos_edge_weight: float [Default: 1.0]
+#    cosmos_prompt: str [Default: 'Industrial warehouse, bright overhead fluorescent lighting, concrete floor']
+#    cosmos_seg_weight: float [Default: 0.25]
 #    distractors: str [Default: 'warehouse']
 #    encryption_key: str [Default: 'tao_key']
 #    epochs: int [Default: 2.0]
-#    experiment_name: str [Default: 'palletjack-detectnet-v2']
+#    experiment_name: str [Default: 'palletjack-cosmos-augmented']
 #    height: int [Default: 544.0]
 #    map_threshold: float [Default: 0.0]
 #    mlflow_s3_endpoint: str [Default: 'http://minio.isaac-mlops-poc.svc:9000']
@@ -22,6 +27,18 @@ components:
     executorLabel: exec-clone-sdg-repo
   comp-convert-to-tfrecords:
     executorLabel: exec-convert-to-tfrecords
+  comp-deploy-cosmos-nim:
+    executorLabel: exec-deploy-cosmos-nim
+    inputDefinitions:
+      parameters:
+        gpu_product:
+          parameterType: STRING
+        namespace:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
   comp-deploy-inference-service:
     executorLabel: exec-deploy-inference-service
     inputDefinitions:
@@ -42,6 +59,10 @@ components:
       parameters:
         batch_size:
           parameterType: NUMBER_INTEGER
+        cosmos_augmented:
+          parameterType: BOOLEAN
+        cosmos_prompt:
+          parameterType: STRING
         distractors:
           parameterType: STRING
         epochs:
@@ -91,6 +112,38 @@ components:
           parameterType: NUMBER_INTEGER
         width:
           parameterType: NUMBER_INTEGER
+  comp-merge-datasets:
+    executorLabel: exec-merge-datasets
+  comp-prepare-control-maps:
+    executorLabel: exec-prepare-control-maps
+    inputDefinitions:
+      parameters:
+        clip_length:
+          parameterType: NUMBER_INTEGER
+        height:
+          parameterType: NUMBER_INTEGER
+        width:
+          parameterType: NUMBER_INTEGER
+  comp-run-cosmos-augmentation:
+    executorLabel: exec-run-cosmos-augmentation
+    inputDefinitions:
+      parameters:
+        cosmos_endpoint:
+          parameterType: STRING
+        cosmos_prompt:
+          parameterType: STRING
+        depth_weight:
+          parameterType: NUMBER_DOUBLE
+        edge_weight:
+          parameterType: NUMBER_DOUBLE
+        seg_weight:
+          parameterType: NUMBER_DOUBLE
+  comp-teardown-cosmos-nim:
+    executorLabel: exec-teardown-cosmos-nim
+    inputDefinitions:
+      parameters:
+        namespace:
+          parameterType: STRING
   comp-train-detectnet:
     executorLabel: exec-train-detectnet
     inputDefinitions:
@@ -113,8 +166,8 @@ deploymentSpec:
     exec-convert-to-tfrecords:
       container:
         args:
-        - echo '=== Converting KITTI to TFRecords ===' && mkdir -p /workspace/tfrecords/warehouse
-          && detectnet_v2 dataset_convert -d /workspace/specs/tfrecords_warehouse.txt
+        - echo '=== Converting KITTI to TFRecords (merged data) ===' && mkdir -p /workspace/tfrecords/warehouse
+          && detectnet_v2 dataset_convert -d /workspace/specs/tfrecords_warehouse_merged.txt
           -o /workspace/tfrecords/warehouse/tfrecord && echo '=== Conversion complete
           ===' && ls -la /workspace/tfrecords/warehouse/
         command:
@@ -135,6 +188,103 @@ deploymentSpec:
           resourceCpuRequest: '4'
           resourceMemoryLimit: 32Gi
           resourceMemoryRequest: 16Gi
+    exec-deploy-cosmos-nim:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - deploy_cosmos_nim
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kubernetes>=29.0.0'\
+          \  &&  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef deploy_cosmos_nim(\n    namespace: str,\n    gpu_product: str,\n\
+          ) -> str:\n    \"\"\"Deploy Cosmos Transfer2.5 NIM as a temporary pod and\
+          \ wait for health.\"\"\"\n    import time\n    from kubernetes import client,\
+          \ config\n\n    config.load_incluster_config()\n    v1 = client.CoreV1Api()\n\
+          \n    pod_name = \"cosmos-transfer-nim\"\n    service_name = \"cosmos-transfer-nim\"\
+          \n\n    pod = client.V1Pod(\n        metadata=client.V1ObjectMeta(\n   \
+          \         name=pod_name,\n            namespace=namespace,\n           \
+          \ labels={\"app\": \"cosmos-transfer-nim\"},\n        ),\n        spec=client.V1PodSpec(\n\
+          \            containers=[\n                client.V1Container(\n       \
+          \             name=\"nim\",\n                    image=\"nvcr.io/nim/nvidia/cosmos-transfer2.5-2b:1.0.0\"\
+          ,\n                    ports=[client.V1ContainerPort(container_port=8000)],\n\
+          \                    resources=client.V1ResourceRequirements(\n        \
+          \                limits={\"nvidia.com/gpu\": \"1\", \"memory\": \"48Gi\"\
+          , \"cpu\": \"8\"},\n                        requests={\"nvidia.com/gpu\"\
+          : \"1\", \"memory\": \"32Gi\", \"cpu\": \"4\"},\n                    ),\n\
+          \                    env=[\n                        client.V1EnvVar(\n \
+          \                           name=\"NGC_API_KEY\",\n                    \
+          \        value_from=client.V1EnvVarSource(\n                           \
+          \     secret_key_ref=client.V1SecretKeySelector(\n                     \
+          \               name=\"ngc-api-key\",\n                                \
+          \    key=\"NGC_API_KEY\",\n                                ),\n        \
+          \                    ),\n                        ),\n                  \
+          \  ],\n                    volume_mounts=[\n                        client.V1VolumeMount(\n\
+          \                            name=\"shm\", mount_path=\"/dev/shm\",\n  \
+          \                      ),\n                    ],\n                    readiness_probe=client.V1Probe(\n\
+          \                        http_get=client.V1HTTPGetAction(\n            \
+          \                path=\"/v1/health/ready\", port=8000,\n               \
+          \         ),\n                        initial_delay_seconds=30,\n      \
+          \                  period_seconds=10,\n                    ),\n        \
+          \        ),\n            ],\n            volumes=[\n                client.V1Volume(\n\
+          \                    name=\"shm\",\n                    empty_dir=client.V1EmptyDirVolumeSource(\n\
+          \                        medium=\"Memory\", size_limit=\"32Gi\",\n     \
+          \               ),\n                ),\n            ],\n            node_selector={\"\
+          nvidia.com/gpu.product\": gpu_product},\n            tolerations=[\n   \
+          \             client.V1Toleration(\n                    key=\"nvidia.com/gpu\"\
+          , operator=\"Exists\", effect=\"NoSchedule\",\n                ),\n    \
+          \        ],\n            image_pull_secrets=[\n                client.V1LocalObjectReference(name=\"\
+          ngc-secret\"),\n            ],\n            restart_policy=\"Never\",\n\
+          \        ),\n    )\n\n    try:\n        v1.delete_namespaced_pod(pod_name,\
+          \ namespace)\n        print(f\"Deleted existing pod {pod_name}, waiting\
+          \ for cleanup...\")\n        time.sleep(10)\n    except client.exceptions.ApiException\
+          \ as e:\n        if e.status != 404:\n            raise\n\n    v1.create_namespaced_pod(namespace=namespace,\
+          \ body=pod)\n    print(f\"Created pod {pod_name}\")\n\n    svc = client.V1Service(\n\
+          \        metadata=client.V1ObjectMeta(\n            name=service_name,\n\
+          \            namespace=namespace,\n            labels={\"app\": \"cosmos-transfer-nim\"\
+          },\n        ),\n        spec=client.V1ServiceSpec(\n            selector={\"\
+          app\": \"cosmos-transfer-nim\"},\n            ports=[client.V1ServicePort(port=8000,\
+          \ target_port=8000)],\n        ),\n    )\n    try:\n        v1.create_namespaced_service(namespace=namespace,\
+          \ body=svc)\n        print(f\"Created service {service_name}\")\n    except\
+          \ client.exceptions.ApiException as e:\n        if e.status == 409:\n  \
+          \          print(f\"Service {service_name} already exists\")\n        else:\n\
+          \            raise\n\n    # NIM needs time for model download, TRT engine\
+          \ build, and warmup inference.\n    # First startup on a new GPU type can\
+          \ take 15+ minutes.\n    NIM_READINESS_TIMEOUT_ITER = 120\n    NIM_POLL_INTERVAL_S\
+          \ = 10\n    endpoint = f\"http://{service_name}.{namespace}.svc:8000\"\n\
+          \    print(f\"Waiting for NIM to be ready at {endpoint}...\")\n    for i\
+          \ in range(NIM_READINESS_TIMEOUT_ITER):\n        time.sleep(NIM_POLL_INTERVAL_S)\n\
+          \        try:\n            pod_status = v1.read_namespaced_pod_status(pod_name,\
+          \ namespace)\n            phase = pod_status.status.phase\n            conditions\
+          \ = pod_status.status.conditions or []\n            ready = any(\n     \
+          \           c.type == \"Ready\" and c.status == \"True\" for c in conditions\n\
+          \            )\n            if ready:\n                print(f\"NIM pod\
+          \ is ready after {(i + 1) * 10}s\")\n                return endpoint\n \
+          \           if phase == \"Failed\":\n                raise RuntimeError(f\"\
+          NIM pod failed: {pod_status.status}\")\n            print(f\"  [{(i + 1)\
+          \ * 10}s] phase={phase}, ready={ready}\")\n        except client.exceptions.ApiException:\n\
+          \            print(f\"  [{(i + 1) * 10}s] waiting for pod...\")\n\n    timeout_min\
+          \ = NIM_READINESS_TIMEOUT_ITER * NIM_POLL_INTERVAL_S // 60\n    raise TimeoutError(f\"\
+          Cosmos NIM pod did not become ready within {timeout_min} minutes\")\n\n"
+        image: registry.access.redhat.com/ubi9/python-311:latest
     exec-deploy-inference-service:
       container:
         args:
@@ -229,16 +379,14 @@ deploymentSpec:
           \ str,\n    experiment_name: str,\n    model_registry_url: str,\n    s3_model_bucket:\
           \ str,\n    num_frames: int,\n    height: int,\n    width: int,\n    distractors:\
           \ str,\n    epochs: int,\n    batch_size: int,\n    map_threshold: float,\n\
-          \    kfp_metrics: dsl.Output[dsl.Metrics],\n) -> str:\n    \"\"\"Parse training\
-          \ status.json, log metrics/artifacts to MLflow, upload ONNX to S3, register\
-          \ model.\"\"\"\n    import json\n    import os\n\n    os.environ[\"MLFLOW_S3_ENDPOINT_URL\"\
+          \    cosmos_augmented: bool,\n    cosmos_prompt: str,\n    kfp_metrics:\
+          \ dsl.Output[dsl.Metrics],\n) -> str:\n    \"\"\"Parse training status.json,\
+          \ log metrics/artifacts to MLflow, upload ONNX to S3, register model.\"\"\
+          \"\n    import json\n    import os\n\n    os.environ[\"MLFLOW_S3_ENDPOINT_URL\"\
           ] = mlflow_s3_endpoint\n    os.environ[\"AWS_ACCESS_KEY_ID\"] = os.environ.get(\"\
           MINIO_ACCESS_KEY\", \"minio\")\n    os.environ[\"AWS_SECRET_ACCESS_KEY\"\
           ] = os.environ.get(\"MINIO_SECRET_KEY\", \"minio123\")\n    os.environ[\"\
-          MLFLOW_TRACKING_INSECURE_TLS\"] = \"true\"\n    # RHOAI MLflow uses TLS\
-          \ + K8s workspace auth:\n    # - Bearer token from ServiceAccount for authentication\n\
-          \    # - X-MLFLOW-WORKSPACE header (= pod namespace) for workspace context\n\
-          \    sa_token_path = \"/var/run/secrets/kubernetes.io/serviceaccount/token\"\
+          MLFLOW_TRACKING_INSECURE_TLS\"] = \"true\"\n    sa_token_path = \"/var/run/secrets/kubernetes.io/serviceaccount/token\"\
           \n    sa_ns_path = \"/var/run/secrets/kubernetes.io/serviceaccount/namespace\"\
           \n    if os.path.exists(sa_token_path):\n        with open(sa_token_path)\
           \ as f:\n            os.environ[\"MLFLOW_TRACKING_TOKEN\"] = f.read().strip()\n\
@@ -281,20 +429,23 @@ deploymentSpec:
           \n    print(f\"Final mAP: {final_map}\")\n    print(f\"Final loss: {final_loss}\"\
           )\n    print(f\"Model size: {model_size_mb:.1f} MB\")\n    print(f\"Model\
           \ exists: {model_exists}\")\n    print(f\"ONNX exists: {onnx_exists}\")\n\
-          \    print(f\"mAP threshold: {map_threshold}\")\n    print(f\"Epochs with\
-          \ metrics: {len(per_epoch_metrics)}\")\n\n    with mlflow.start_run() as\
-          \ run:\n        mlflow.log_params({\n            \"num_frames\": num_frames,\n\
-          \            \"image_height\": height,\n            \"image_width\": width,\n\
-          \            \"distractors\": distractors,\n            \"epochs\": epochs,\n\
-          \            \"batch_size\": batch_size,\n            \"architecture\":\
-          \ \"resnet18\",\n            \"detector\": \"detectnet_v2\",\n        })\n\
-          \n        mlflow.log_metrics({\n            \"final_map\": final_map,\n\
-          \            \"final_loss\": final_loss,\n            \"model_size_mb\"\
-          : model_size_mb,\n            \"param_count_millions\": param_count_m,\n\
-          \        })\n\n        kfp_metrics.log_metric(\"final_map\", final_map)\n\
-          \        kfp_metrics.log_metric(\"final_loss\", final_loss)\n        kfp_metrics.log_metric(\"\
-          model_size_mb\", model_size_mb)\n        kfp_metrics.log_metric(\"param_count_millions\"\
-          , param_count_m)\n\n        for em in per_epoch_metrics:\n            mlflow.log_metrics(\n\
+          \    print(f\"mAP threshold: {map_threshold}\")\n    print(f\"Cosmos augmented:\
+          \ {cosmos_augmented}\")\n\n    with mlflow.start_run() as run:\n       \
+          \ params = {\n            \"num_frames\": num_frames,\n            \"image_height\"\
+          : height,\n            \"image_width\": width,\n            \"distractors\"\
+          : distractors,\n            \"epochs\": epochs,\n            \"batch_size\"\
+          : batch_size,\n            \"architecture\": \"resnet18\",\n           \
+          \ \"detector\": \"detectnet_v2\",\n            \"cosmos_augmented\": cosmos_augmented,\n\
+          \        }\n        if cosmos_augmented:\n            params[\"cosmos_prompt\"\
+          ] = cosmos_prompt\n        mlflow.log_params(params)\n\n        mlflow.log_metrics({\n\
+          \            \"final_map\": final_map,\n            \"final_loss\": final_loss,\n\
+          \            \"model_size_mb\": model_size_mb,\n            \"param_count_millions\"\
+          : param_count_m,\n        })\n\n        kfp_metrics.log_metric(\"final_map\"\
+          , final_map)\n        kfp_metrics.log_metric(\"final_loss\", final_loss)\n\
+          \        kfp_metrics.log_metric(\"model_size_mb\", model_size_mb)\n    \
+          \    kfp_metrics.log_metric(\"param_count_millions\", param_count_m)\n \
+          \       kfp_metrics.log_metric(\"cosmos_augmented\", 1.0 if cosmos_augmented\
+          \ else 0.0)\n\n        for em in per_epoch_metrics:\n            mlflow.log_metrics(\n\
           \                {\"epoch_loss\": em[\"loss\"], \"epoch_map\": em[\"map\"\
           ],\n                 \"epoch_val_cost\": em[\"val_cost\"]},\n          \
           \      step=em[\"epoch\"],\n            )\n\n        mlflow.log_artifact(status_file,\
@@ -306,22 +457,22 @@ deploymentSpec:
           \ artifact_path=\"model\")\n            client = mlflow.MlflowClient()\n\
           \            try:\n                client.create_registered_model(\"palletjack-detectnet-v2\"\
           )\n            except mlflow.exceptions.MlflowException:\n             \
-          \   pass  # already exists\n            client.create_model_version(\n \
-          \               name=\"palletjack-detectnet-v2\",\n                source=f\"\
-          runs:/{run.info.run_id}/model\",\n                run_id=run.info.run_id,\n\
-          \            )\n            result = f\"REGISTERED (mAP={final_map:.4f}\
-          \ >= {map_threshold})\"\n        elif model_exists:\n            mlflow.log_artifact(model_path,\
-          \ artifact_path=\"model\")\n            if onnx_exists:\n              \
-          \  mlflow.log_artifact(onnx_path, artifact_path=\"model\")\n           \
-          \ result = f\"LOGGED_ONLY (mAP={final_map:.4f} < {map_threshold})\"\n  \
-          \      else:\n            result = \"NO_MODEL (model file not found)\"\n\
-          \n        mlflow.set_tag(\"result\", result)\n        print(f\"Result: {result}\"\
-          )\n        print(f\"MLflow run ID: {run.info.run_id}\")\n\n    # Upload\
-          \ ONNX to MinIO (KServe expects s3://<bucket>/<model-name>/<version>/model.onnx)\n\
-          \    s3_model_uri = \"\"\n    if onnx_exists:\n        import boto3\n\n\
-          \        s3 = boto3.client(\n            \"s3\",\n            endpoint_url=mlflow_s3_endpoint,\n\
-          \            aws_access_key_id=os.environ.get(\"AWS_ACCESS_KEY_ID\"),\n\
-          \            aws_secret_access_key=os.environ.get(\"AWS_SECRET_ACCESS_KEY\"\
+          \   pass\n            client.create_model_version(\n                name=\"\
+          palletjack-detectnet-v2\",\n                source=f\"runs:/{run.info.run_id}/model\"\
+          ,\n                run_id=run.info.run_id,\n            )\n            result\
+          \ = f\"REGISTERED (mAP={final_map:.4f} >= {map_threshold})\"\n        elif\
+          \ model_exists:\n            mlflow.log_artifact(model_path, artifact_path=\"\
+          model\")\n            if onnx_exists:\n                mlflow.log_artifact(onnx_path,\
+          \ artifact_path=\"model\")\n            result = f\"LOGGED_ONLY (mAP={final_map:.4f}\
+          \ < {map_threshold})\"\n        else:\n            result = \"NO_MODEL (model\
+          \ file not found)\"\n\n        mlflow.set_tag(\"result\", result)\n    \
+          \    if cosmos_augmented:\n            mlflow.set_tag(\"augmentation\",\
+          \ \"cosmos-transfer-2.5\")\n        print(f\"Result: {result}\")\n     \
+          \   print(f\"MLflow run ID: {run.info.run_id}\")\n\n    s3_model_uri = \"\
+          \"\n    if onnx_exists:\n        import boto3\n\n        s3 = boto3.client(\n\
+          \            \"s3\",\n            endpoint_url=mlflow_s3_endpoint,\n   \
+          \         aws_access_key_id=os.environ.get(\"AWS_ACCESS_KEY_ID\"),\n   \
+          \         aws_secret_access_key=os.environ.get(\"AWS_SECRET_ACCESS_KEY\"\
           ),\n        )\n        s3_key = \"palletjack-detectnet-v2/1/model.onnx\"\
           \n        s3.upload_file(onnx_path, s3_model_bucket, s3_key)\n        s3_model_uri\
           \ = f\"s3://{s3_model_bucket}/palletjack-detectnet-v2/1/\"\n        print(f\"\
@@ -337,15 +488,16 @@ deploymentSpec:
           1\",\n            version=run.info.run_id[:8],\n            description=(\n\
           \                f\"DetectNet_v2 ResNet-18 palletjack detector. \"\n   \
           \             f\"mAP={final_map:.4f}, loss={final_loss:.6f}, \"\n      \
-          \          f\"{num_frames} frames, {epochs} epochs.\"\n            ),\n\
-          \            metadata={\n                \"mlflow_run_id\": run.info.run_id,\n\
+          \          f\"{num_frames} frames, {epochs} epochs.\"\n                f\"\
+          {' Cosmos Transfer augmented.' if cosmos_augmented else ''}\"\n        \
+          \    ),\n            metadata={\n                \"mlflow_run_id\": run.info.run_id,\n\
           \                \"final_map\": final_map,\n                \"final_loss\"\
           : final_loss,\n                \"model_size_mb\": model_size_mb,\n     \
           \           \"num_frames\": num_frames,\n                \"epochs\": epochs,\n\
           \                \"batch_size\": batch_size,\n                \"distractors\"\
-          : distractors,\n            },\n        )\n        print(f\"RHOAI Model\
-          \ Registry: registered {rm.name} (format={model_fmt})\")\n\n    return result\n\
-          \n"
+          : distractors,\n                \"cosmos_augmented\": cosmos_augmented,\n\
+          \            },\n        )\n        print(f\"RHOAI Model Registry: registered\
+          \ {rm.name} (format={model_fmt})\")\n\n    return result\n\n"
         image: registry.access.redhat.com/ubi9/python-311:latest
     exec-export-to-onnx:
       container:
@@ -410,6 +562,103 @@ deploymentSpec:
           resourceCpuRequest: '4'
           resourceMemoryLimit: 32Gi
           resourceMemoryRequest: 16Gi
+    exec-merge-datasets:
+      container:
+        args:
+        - 'echo ''=== Merging original + augmented data ==='' && mkdir -p /output/palletjack_data_merged/warehouse/Camera/rgb
+          && mkdir -p /output/palletjack_data_merged/warehouse/Camera/object_detection
+          && cp /output/palletjack_data/warehouse/Camera/rgb/*.png    /output/palletjack_data_merged/warehouse/Camera/rgb/
+          && cp /output/palletjack_data/warehouse/Camera/object_detection/*.txt    /output/palletjack_data_merged/warehouse/Camera/object_detection/
+          && ORIG=$(ls /output/palletjack_data_merged/warehouse/Camera/rgb/ | wc -l)
+          && echo "Original images: $ORIG" && if [ -d /output/cosmos_augmented/Camera/rgb
+          ]; then   cp /output/cosmos_augmented/Camera/rgb/*.png      /output/palletjack_data_merged/warehouse/Camera/rgb/
+          2>/dev/null;   cp /output/cosmos_augmented/Camera/object_detection/*.txt      /output/palletjack_data_merged/warehouse/Camera/object_detection/
+          2>/dev/null; fi && TOTAL=$(ls /output/palletjack_data_merged/warehouse/Camera/rgb/
+          | wc -l) && AUG=$((TOTAL - ORIG)) && echo "Augmented images: $AUG" && echo
+          "Total merged: $TOTAL images" && echo ''=== Merge complete ==='''
+        command:
+        - /bin/bash
+        - -c
+        image: registry.access.redhat.com/ubi9/ubi:latest
+    exec-prepare-control-maps:
+      container:
+        args:
+        - --input-dir
+        - /output/palletjack_data/warehouse/Camera
+        - --output-dir
+        - /output/cosmos_clips
+        - --clip-length
+        - '{{$.inputs.parameters[''clip_length'']}}'
+        - --height
+        - '{{$.inputs.parameters[''height'']}}'
+        - --width
+        - '{{$.inputs.parameters[''width'']}}'
+        command:
+        - python
+        - /app/prepare_control_maps.py
+        image: quay.io/jary/cosmos-prep:latest
+    exec-run-cosmos-augmentation:
+      container:
+        args:
+        - --clips-dir
+        - /output/cosmos_clips
+        - --output-dir
+        - /output/cosmos_augmented/Camera
+        - --labels-dir
+        - /output/palletjack_data/warehouse/Camera/object_detection
+        - --endpoint
+        - '{{$.inputs.parameters[''cosmos_endpoint'']}}'
+        - --prompt
+        - '{{$.inputs.parameters[''cosmos_prompt'']}}'
+        - --edge-weight
+        - '{{$.inputs.parameters[''edge_weight'']}}'
+        - --depth-weight
+        - '{{$.inputs.parameters[''depth_weight'']}}'
+        - --seg-weight
+        - '{{$.inputs.parameters[''seg_weight'']}}'
+        command:
+        - python
+        - /app/run_cosmos_augmentation.py
+        image: quay.io/jary/cosmos-prep:latest
+    exec-teardown-cosmos-nim:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - teardown_cosmos_nim
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kubernetes>=29.0.0'\
+          \  &&  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef teardown_cosmos_nim(\n    namespace: str,\n):\n    \"\"\"Delete\
+          \ the temporary Cosmos Transfer NIM pod and service.\"\"\"\n    from kubernetes\
+          \ import client, config\n\n    config.load_incluster_config()\n    v1 =\
+          \ client.CoreV1Api()\n\n    for resource, delete_fn in [\n        (\"pod\"\
+          , lambda: v1.delete_namespaced_pod(\"cosmos-transfer-nim\", namespace)),\n\
+          \        (\"service\", lambda: v1.delete_namespaced_service(\"cosmos-transfer-nim\"\
+          , namespace)),\n    ]:\n        try:\n            delete_fn()\n        \
+          \    print(f\"Deleted {resource} cosmos-transfer-nim\")\n        except\
+          \ client.exceptions.ApiException as e:\n            if e.status == 404:\n\
+          \                print(f\"{resource} cosmos-transfer-nim already deleted\"\
+          )\n            else:\n                raise\n\n"
+        image: registry.access.redhat.com/ubi9/python-311:latest
     exec-train-detectnet:
       container:
         args:
@@ -447,10 +696,10 @@ deploymentSpec:
           \    print(f\"TrainJob {job_name} completed successfully\")\n\n"
         image: registry.access.redhat.com/ubi9/python-311:latest
 pipelineInfo:
-  description: Synthetic data generation with Isaac Sim Replicator, model training
-    with TAO DetectNet_v2, ONNX export, experiment tracking + model registration with
-    MLflow, and deployment as a KServe InferenceService.
-  name: isaac-synth-train-serve
+  description: Synthetic data generation with Isaac Sim Replicator, Cosmos Transfer2.5
+    sim-to-real augmentation, model training with TAO DetectNet_v2, ONNX export, experiment
+    tracking + model registration with MLflow, and deployment as a KServe InferenceService.
+  name: isaac-cosmos-synth-train-serve
 root:
   dag:
     tasks:
@@ -467,9 +716,26 @@ root:
         componentRef:
           name: comp-convert-to-tfrecords
         dependentTasks:
-        - generate-synthetic-data
+        - merge-datasets
         taskInfo:
           name: convert-to-tfrecords
+      deploy-cosmos-nim:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-deploy-cosmos-nim
+        dependentTasks:
+        - prepare-control-maps
+        inputs:
+          parameters:
+            gpu_product:
+              runtimeValue:
+                constant: NVIDIA-L40S
+            namespace:
+              runtimeValue:
+                constant: isaac-mlops-poc
+        taskInfo:
+          name: deploy-cosmos-nim
       deploy-inference-service:
         cachingOptions:
           enableCache: true
@@ -508,6 +774,11 @@ root:
           parameters:
             batch_size:
               componentInputParameter: batch_size
+            cosmos_augmented:
+              runtimeValue:
+                constant: true
+            cosmos_prompt:
+              componentInputParameter: cosmos_prompt
             distractors:
               componentInputParameter: distractors
             epochs:
@@ -564,6 +835,69 @@ root:
               componentInputParameter: width
         taskInfo:
           name: generate-synthetic-data
+      merge-datasets:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-merge-datasets
+        dependentTasks:
+        - teardown-cosmos-nim
+        taskInfo:
+          name: merge-datasets
+      prepare-control-maps:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-prepare-control-maps
+        dependentTasks:
+        - generate-synthetic-data
+        inputs:
+          parameters:
+            clip_length:
+              componentInputParameter: cosmos_clip_length
+            height:
+              componentInputParameter: height
+            width:
+              componentInputParameter: width
+        taskInfo:
+          name: prepare-control-maps
+      run-cosmos-augmentation:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-run-cosmos-augmentation
+        dependentTasks:
+        - deploy-cosmos-nim
+        inputs:
+          parameters:
+            cosmos_endpoint:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: deploy-cosmos-nim
+            cosmos_prompt:
+              componentInputParameter: cosmos_prompt
+            depth_weight:
+              componentInputParameter: cosmos_depth_weight
+            edge_weight:
+              componentInputParameter: cosmos_edge_weight
+            seg_weight:
+              componentInputParameter: cosmos_seg_weight
+        taskInfo:
+          name: run-cosmos-augmentation
+      teardown-cosmos-nim:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-teardown-cosmos-nim
+        dependentTasks:
+        - run-cosmos-augmentation
+        inputs:
+          parameters:
+            namespace:
+              runtimeValue:
+                constant: isaac-mlops-poc
+        taskInfo:
+          name: teardown-cosmos-nim
       train-detectnet:
         cachingOptions:
           enableCache: true
@@ -583,6 +917,27 @@ root:
         defaultValue: 4.0
         isOptional: true
         parameterType: NUMBER_INTEGER
+      cosmos_clip_length:
+        defaultValue: 25.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      cosmos_depth_weight:
+        defaultValue: 0.25
+        isOptional: true
+        parameterType: NUMBER_DOUBLE
+      cosmos_edge_weight:
+        defaultValue: 1.0
+        isOptional: true
+        parameterType: NUMBER_DOUBLE
+      cosmos_prompt:
+        defaultValue: Industrial warehouse, bright overhead fluorescent lighting,
+          concrete floor
+        isOptional: true
+        parameterType: STRING
+      cosmos_seg_weight:
+        defaultValue: 0.25
+        isOptional: true
+        parameterType: NUMBER_DOUBLE
       distractors:
         defaultValue: warehouse
         isOptional: true
@@ -596,7 +951,7 @@ root:
         isOptional: true
         parameterType: NUMBER_INTEGER
       experiment_name:
-        defaultValue: palletjack-detectnet-v2
+        defaultValue: palletjack-cosmos-augmented
         isOptional: true
         parameterType: STRING
       height:
@@ -761,3 +1116,24 @@ platforms:
           - effect: NoSchedule
             key: nvidia.com/gpu
             operator: Exists
+        exec-merge-datasets:
+          pvcMount:
+          - constant: synthetic-data
+            mountPath: /output
+            pvcNameParameter:
+              runtimeValue:
+                constant: synthetic-data
+        exec-prepare-control-maps:
+          pvcMount:
+          - constant: synthetic-data
+            mountPath: /output
+            pvcNameParameter:
+              runtimeValue:
+                constant: synthetic-data
+        exec-run-cosmos-augmentation:
+          pvcMount:
+          - constant: synthetic-data
+            mountPath: /output
+            pvcNameParameter:
+              runtimeValue:
+                constant: synthetic-data
