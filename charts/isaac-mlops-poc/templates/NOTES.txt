@@ -19,7 +19,11 @@ Isaac MLOps PoC deployed to namespace: {{ include "isaac-mlops.namespace" . }}
    Tip: pass --set ngc.apiKey=<key> at install time to automate this.
 {{- else }}
 
-1. NGC secrets created and linked automatically (ngc.apiKey was provided).
+1. NGC secrets created automatically (ngc.apiKey was provided).
+   Link the pull secret to the pipeline runner SA:
+
+   oc secrets link pipeline-runner-isaac-pipelines ngc-secret \
+     --for=pull -n {{ include "isaac-mlops.namespace" . }}
 {{- end }}
 
 2. Verify infrastructure is ready:

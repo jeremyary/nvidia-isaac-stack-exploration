@@ -76,7 +76,7 @@ To populate MLflow with comparison data across different configurations, run the
 python pipelines/parameter_sweep.py
 ```
 
-Runs are submitted one at a time because the data and model PVCs are `ReadWriteOnce` — only one pipeline run can mount them at a time. Each run goes through the full pipeline (data generation → TFRecord conversion → training → evaluation), so **expect the full sweep to take several hours**. Isaac Sim synthetic data generation is the bottleneck — the container is ~15GB and GPU rendering is compute-intensive even for small frame counts.
+Runs are submitted one at a time because the data and model PVCs are `ReadWriteOnce` — only one pipeline run can mount them at a time. Each run goes through the full pipeline (data generation → TFRecord conversion → training → evaluation). A baseline run (100 frames, 2 epochs) completes in roughly 12 minutes on an L40S; **expect the full sweep to take about an hour** depending on the parameter combinations.
 
 | Run | num_frames | epochs | batch_size |
 |-----|-----------|--------|------------|
@@ -87,6 +87,36 @@ Runs are submitted one at a time because the data and model PVCs are `ReadWriteO
 | combined | 200 | 4 | 8 |
 
 Results are logged to MLflow under the `palletjack-parameter-sweep` experiment for side-by-side comparison.
+
+## OpenShift Security and RBAC
+
+NVIDIA containers are not designed for OpenShift's security model. Both Isaac Sim and TAO Toolkit require `runAsUser: 0` (root), which conflicts with OpenShift's default `restricted` Security Context Constraint (SCC). This section documents the elevated permissions the chart grants and why.
+
+### SCC: anyuid
+
+The `pipeline-runner-isaac-pipelines` service account is granted the `anyuid` SCC via a ClusterRoleBinding. This allows pipeline step pods and TrainJob pods to run as root — a hard requirement for NVIDIA's containers, which write to root-owned paths and expect UID 0.
+
+The ClusterTrainingRuntime explicitly sets `serviceAccountName: pipeline-runner-isaac-pipelines` so that TrainJob pods inherit the same SCC grant. Without this, TrainJobs use the `default` SA and fail with SCC validation errors.
+
+### RBAC grants
+
+The chart creates the following bindings, all scoped to the `pipeline-runner-isaac-pipelines` SA:
+
+| Binding | Scope | Purpose |
+|---------|-------|---------|
+| `anyuid` SCC | Cluster | NVIDIA containers require root |
+| `mlflow-edit` / `mlflow-view` | Cluster | Pipeline steps log to RHOAI MLflow via K8s workspace auth |
+| `kueue-trainjob-editor-role` | Namespace | Create/monitor TrainJob resources |
+| `cluster-training-runtime-reader` | Cluster | Look up ClusterTrainingRuntime for TrainJobs |
+| `training-runtime-reader` | Namespace | Kubeflow SDK checks namespace-scoped TrainingRuntimes first; without read access the lookup returns 403 (not 404), preventing fallthrough to cluster scope |
+
+### Cross-namespace resources
+
+The Model Registry components (Postgres, Secret, PVC, ModelRegistry CR) are deployed in `rhoai-model-registries` — the namespace the RHOAI Model Registry operator watches. This is a Helm anti-pattern (resources outside the release namespace), but is required by the operator's design. These resources are tracked by Helm and cleaned up on `helm uninstall`.
+
+### GPU resource management
+
+GPU allocation is managed by Kueue rather than namespace ResourceQuotas. The ClusterQueue defines nominal GPU quotas, and the LocalQueue in the project namespace gates workload admission. All GPU containers specify explicit resource requests and limits for `nvidia.com/gpu`, `cpu`, and `memory`.
 
 ## Screenshots
 

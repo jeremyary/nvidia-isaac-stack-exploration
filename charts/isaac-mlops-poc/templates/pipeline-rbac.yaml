@@ -86,6 +86,38 @@ rules:
   resources: ["clustertrainingruntimes"]
   verbs: ["get", "list", "watch"]
 ---
+# Namespace-scoped TrainingRuntime read access — the Kubeflow Trainer SDK
+# checks namespace-scoped TrainingRuntimes first and only falls through to
+# ClusterTrainingRuntime on a 404. Without this, the SA gets a 403 which
+# the SDK treats as a hard failure.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: training-runtime-reader
+  namespace: {{ include "isaac-mlops.namespace" . }}
+  labels:
+    {{- include "isaac-mlops.labels" . | nindent 4 }}
+rules:
+- apiGroups: ["trainer.kubeflow.org"]
+  resources: ["trainingruntimes"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "isaac-mlops.namespace" . }}-training-runtime-reader
+  namespace: {{ include "isaac-mlops.namespace" . }}
+  labels:
+    {{- include "isaac-mlops.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: training-runtime-reader
+subjects:
+- kind: ServiceAccount
+  name: pipeline-runner-isaac-pipelines
+  namespace: {{ include "isaac-mlops.namespace" . }}
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
