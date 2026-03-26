@@ -4,6 +4,9 @@ Automated MLOps pipeline for NVIDIA's synthetic data generation and model traini
 
 Takes the manual process from NVIDIA's Isaac [Sim Module 3](https://docs.nvidia.com/learning/physical-ai/getting-started-with-isaac-sim/latest/synthetic-data-generation-for-perception-model-training-in-isaac-sim/index.html) — generate synthetic images, convert annotations, train an object detection model, evaluate results — and wraps it in a single parameterized pipeline with experiment tracking and model registration.
 
+> [!NOTE]
+> This project was developed with assistance from AI tools.
+> 
 ## What It Does
 
 ```
