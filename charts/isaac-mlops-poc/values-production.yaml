@@ -53,3 +53,9 @@ tao:
   training:
     epochs: 80
     batchSize: 32
+
+# Model serving — larger memory for production inference
+serving:
+  inference:
+    memory: 16Gi
+    memoryRequest: 8Gi

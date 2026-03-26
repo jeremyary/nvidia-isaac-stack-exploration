@@ -1,6 +1,7 @@
 # This project was developed with assistance from AI tools.
 """
-End-to-end pipeline: Isaac Sim synthetic data generation → TAO training → MLflow registration.
+End-to-end pipeline: Isaac Sim synthetic data generation → TAO training →
+ONNX export → MLflow registration → KServe model serving.
 
 Compile:  python pipelines/isaac_training_pipeline.py
 Submit:   upload pipelines/isaac_training_pipeline.yaml via RHOAI dashboard or API
@@ -122,7 +123,31 @@ def train_detectnet(
 
 
 # ---------------------------------------------------------------------------
-# Step 5: Evaluate results and register model in MLflow
+# Step 5: Export trained model to ONNX for serving
+# ---------------------------------------------------------------------------
+@dsl.container_component
+def export_to_onnx(encryption_key: str):
+    return dsl.ContainerSpec(
+        image="nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf1.15.5",
+        command=["/bin/bash", "-c"],
+        args=[
+            "echo '=== TAO DetectNet_v2 Export to ONNX ===' && "
+            "nvidia-smi && "
+            "detectnet_v2 export "
+            '-m /workspace/output/resnet18_palletjack/weights/model.hdf5 '
+            '-o /workspace/output/resnet18_palletjack/weights/model.onnx '
+            '-k "$1" '
+            "--data_type fp32 && "
+            "echo '=== Export complete ===' && "
+            "ls -la /workspace/output/resnet18_palletjack/weights/model.onnx",
+            "--",
+            encryption_key,
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Step 6: Evaluate results and register model in MLflow
 # ---------------------------------------------------------------------------
 @dsl.component(
     base_image="registry.access.redhat.com/ubi9/python-311:latest",
@@ -133,6 +158,7 @@ def evaluate_and_register(
     mlflow_s3_endpoint: str,
     experiment_name: str,
     model_registry_url: str,
+    s3_model_bucket: str,
     num_frames: int,
     height: int,
     width: int,
@@ -140,8 +166,9 @@ def evaluate_and_register(
     epochs: int,
     batch_size: int,
     map_threshold: float,
+    kfp_metrics: dsl.Output[dsl.Metrics],
 ) -> str:
-    """Parse training status.json, log metrics to MLflow, register model if mAP > threshold."""
+    """Parse training status.json, log metrics/artifacts to MLflow, upload ONNX to S3, register model."""
     import json
     import os
 
@@ -236,12 +263,15 @@ def evaluate_and_register(
             })
 
     model_path = "/workspace/output/resnet18_palletjack/weights/model.hdf5"
+    onnx_path = "/workspace/output/resnet18_palletjack/weights/model.onnx"
     model_exists = os.path.exists(model_path)
+    onnx_exists = os.path.exists(onnx_path)
 
     print(f"Final mAP: {final_map}")
     print(f"Final loss: {final_loss}")
     print(f"Model size: {model_size_mb:.1f} MB")
     print(f"Model exists: {model_exists}")
+    print(f"ONNX exists: {onnx_exists}")
     print(f"mAP threshold: {map_threshold}")
     print(f"Epochs with metrics: {len(per_epoch_metrics)}")
 
@@ -264,6 +294,12 @@ def evaluate_and_register(
             "param_count_millions": param_count_m,
         })
 
+        # Also log to KFP metrics so the DSPA compare view can show them
+        kfp_metrics.log_metric("final_map", final_map)
+        kfp_metrics.log_metric("final_loss", final_loss)
+        kfp_metrics.log_metric("model_size_mb", model_size_mb)
+        kfp_metrics.log_metric("param_count_millions", param_count_m)
+
         # Log per-epoch metrics so MLflow can render training curves
         for em in per_epoch_metrics:
             mlflow.log_metrics(
@@ -280,6 +316,8 @@ def evaluate_and_register(
 
         if model_exists and final_map >= map_threshold:
             mlflow.log_artifact(model_path, artifact_path="model")
+            if onnx_exists:
+                mlflow.log_artifact(onnx_path, artifact_path="model")
             client = mlflow.MlflowClient()
             try:
                 client.create_registered_model("palletjack-detectnet-v2")
@@ -293,6 +331,8 @@ def evaluate_and_register(
             result = f"REGISTERED (mAP={final_map:.4f} >= {map_threshold})"
         elif model_exists:
             mlflow.log_artifact(model_path, artifact_path="model")
+            if onnx_exists:
+                mlflow.log_artifact(onnx_path, artifact_path="model")
             result = f"LOGGED_ONLY (mAP={final_map:.4f} < {map_threshold})"
         else:
             result = f"NO_MODEL (model file not found)"
@@ -300,6 +340,23 @@ def evaluate_and_register(
         mlflow.set_tag("result", result)
         print(f"Result: {result}")
         print(f"MLflow run ID: {run.info.run_id}")
+
+    # Upload ONNX model to MinIO for KServe model serving.
+    # KServe expects: s3://<bucket>/<model-name>/<version>/model.onnx
+    s3_model_uri = ""
+    if onnx_exists:
+        import boto3
+
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=mlflow_s3_endpoint,
+            aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
+        )
+        s3_key = "palletjack-detectnet-v2/1/model.onnx"
+        s3.upload_file(onnx_path, s3_model_bucket, s3_key)
+        s3_model_uri = f"s3://{s3_model_bucket}/palletjack-detectnet-v2/1/"
+        print(f"Uploaded ONNX to {s3_model_uri}")
 
     # Register in RHOAI Model Registry (Kubeflow Model Registry API)
     if model_exists and final_map >= map_threshold:
@@ -311,10 +368,13 @@ def evaluate_and_register(
             author="isaac-pipeline",
             is_secure=False,
         )
+        # Use ONNX format and S3 URI when available, otherwise fall back to MLflow
+        model_uri = s3_model_uri if s3_model_uri else f"runs:/{run.info.run_id}/model"
+        model_fmt = "onnx" if onnx_exists else "hdf5"
         rm = registry.register_model(
             "palletjack-detectnet-v2",
-            f"runs:/{run.info.run_id}/model",
-            model_format_name="hdf5",
+            model_uri,
+            model_format_name=model_fmt,
             model_format_version="1",
             version=run.info.run_id[:8],
             description=(
@@ -333,9 +393,99 @@ def evaluate_and_register(
                 "distractors": distractors,
             },
         )
-        print(f"RHOAI Model Registry: registered {rm.name}")
+        print(f"RHOAI Model Registry: registered {rm.name} (format={model_fmt})")
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Step 7: Deploy model as a KServe InferenceService
+# ---------------------------------------------------------------------------
+@dsl.component(
+    base_image="registry.access.redhat.com/ubi9/python-311:latest",
+    packages_to_install=["kubernetes>=29.0.0"],
+)
+def deploy_inference_service(
+    model_name: str,
+    serving_runtime: str,
+    storage_uri: str,
+    namespace: str,
+    gpu_product: str,
+):
+    """Create or update a KServe InferenceService for the trained model.
+
+    Uses RawDeployment mode (RHOAI 3.x default) with either OVMS or Triton
+    ServingRuntime. The InferenceService pulls the ONNX model from MinIO.
+    """
+    from kubernetes import client, config
+
+    config.load_incluster_config()
+    api = client.CustomObjectsApi()
+
+    isvc = {
+        "apiVersion": "serving.kserve.io/v1beta1",
+        "kind": "InferenceService",
+        "metadata": {
+            "name": model_name,
+            "namespace": namespace,
+            "annotations": {
+                "serving.kserve.io/deploymentMode": "RawDeployment",
+            },
+        },
+        "spec": {
+            "predictor": {
+                "model": {
+                    "modelFormat": {"name": "onnx"},
+                    "runtime": f"{serving_runtime}-runtime",
+                    "storageUri": storage_uri,
+                },
+                "serviceAccountName": "model-serving",
+            },
+        },
+    }
+
+    # Add GPU node selector for Triton runtime
+    if serving_runtime == "triton":
+        isvc["spec"]["predictor"]["nodeSelector"] = {
+            "nvidia.com/gpu.product": gpu_product,
+        }
+        isvc["spec"]["predictor"]["tolerations"] = [
+            {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"},
+        ]
+
+    try:
+        api.get_namespaced_custom_object(
+            group="serving.kserve.io",
+            version="v1beta1",
+            namespace=namespace,
+            plural="inferenceservices",
+            name=model_name,
+        )
+        # Update existing
+        api.patch_namespaced_custom_object(
+            group="serving.kserve.io",
+            version="v1beta1",
+            namespace=namespace,
+            plural="inferenceservices",
+            name=model_name,
+            body=isvc,
+        )
+        print(f"Updated InferenceService {model_name}")
+    except client.exceptions.ApiException as e:
+        if e.status == 404:
+            api.create_namespaced_custom_object(
+                group="serving.kserve.io",
+                version="v1beta1",
+                namespace=namespace,
+                plural="inferenceservices",
+                body=isvc,
+            )
+            print(f"Created InferenceService {model_name}")
+        else:
+            raise
+
+    print(f"InferenceService {model_name} deployed with runtime {serving_runtime}-runtime")
+    print(f"Model source: {storage_uri}")
 
 
 # ---------------------------------------------------------------------------
@@ -405,11 +555,12 @@ def _configure_pvc(
 # Pipeline definition
 # ---------------------------------------------------------------------------
 @dsl.pipeline(
-    name="isaac-synth-train-validate",
+    name="isaac-synth-train-serve",
     description=(
         "Synthetic data generation with Isaac Sim Replicator, "
-        "model training with TAO DetectNet_v2, "
-        "and experiment tracking + model registration with MLflow."
+        "model training with TAO DetectNet_v2, ONNX export, "
+        "experiment tracking + model registration with MLflow, "
+        "and deployment as a KServe InferenceService."
     ),
 )
 def isaac_training_pipeline(
@@ -426,6 +577,8 @@ def isaac_training_pipeline(
     experiment_name: str = "palletjack-detectnet-v2",
     model_registry_url: str = "http://isaac-registry.rhoai-model-registries.svc.cluster.local",
     map_threshold: float = 0.0,
+    serving_runtime: str = "ovms",
+    s3_model_bucket: str = "models",
 ):
     # -- Step 1: Clone SDG repo to workspace PVC --
     clone_task = clone_sdg_repo()
@@ -466,12 +619,21 @@ def isaac_training_pipeline(
         training_runtime=training_runtime,
     ).after(convert_task)
 
-    # -- Step 5: Evaluate + register in MLflow + RHOAI Model Registry (no GPU) --
+    # -- Step 5: Export trained model to ONNX (GPU) --
+    export_task = export_to_onnx(
+        encryption_key=encryption_key,
+    ).after(train_task)
+    _configure_pvc(export_task, model_artifacts=True)
+    _configure_gpu(export_task)
+    kubernetes.set_image_pull_secrets(export_task, ["ngc-secret"])
+
+    # -- Step 6: Evaluate + register in MLflow + RHOAI Model Registry (no GPU) --
     eval_task = evaluate_and_register(
         mlflow_tracking_uri=mlflow_tracking_uri,
         mlflow_s3_endpoint=mlflow_s3_endpoint,
         experiment_name=experiment_name,
         model_registry_url=model_registry_url,
+        s3_model_bucket=s3_model_bucket,
         num_frames=num_frames,
         height=height,
         width=width,
@@ -479,7 +641,7 @@ def isaac_training_pipeline(
         epochs=epochs,
         batch_size=batch_size,
         map_threshold=map_threshold,
-    ).after(train_task)
+    ).after(export_task)
     _configure_pvc(eval_task, model_artifacts=True, specs=True)
     kubernetes.use_secret_as_env(
         eval_task, secret_name="minio-credentials",
@@ -488,6 +650,15 @@ def isaac_training_pipeline(
             "secretkey": "MINIO_SECRET_KEY",
         },
     )
+
+    # -- Step 7: Deploy as KServe InferenceService (no GPU) --
+    deploy_task = deploy_inference_service(
+        model_name="palletjack-detectnet-v2",
+        serving_runtime=serving_runtime,
+        storage_uri=f"s3://{s3_model_bucket}/palletjack-detectnet-v2/",
+        namespace="isaac-mlops-poc",
+        gpu_product="NVIDIA-L40S",
+    ).after(eval_task)
 
 
 if __name__ == "__main__":

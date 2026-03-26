@@ -133,4 +133,39 @@ subjects:
   name: pipeline-runner-isaac-pipelines
   namespace: {{ include "isaac-mlops.namespace" . }}
 {{- end }}
+{{- if .Values.serving.enabled }}
+---
+# KServe InferenceService management — allows pipeline steps to create,
+# update, and monitor InferenceService resources for model deployment.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: inferenceservice-manager
+  namespace: {{ include "isaac-mlops.namespace" . }}
+  labels:
+    {{- include "isaac-mlops.labels" . | nindent 4 }}
+rules:
+- apiGroups: ["serving.kserve.io"]
+  resources: ["inferenceservices"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["serving.kserve.io"]
+  resources: ["inferenceservices/status"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pipeline-runner-inferenceservice-manager
+  namespace: {{ include "isaac-mlops.namespace" . }}
+  labels:
+    {{- include "isaac-mlops.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: inferenceservice-manager
+subjects:
+- kind: ServiceAccount
+  name: pipeline-runner-isaac-pipelines
+  namespace: {{ include "isaac-mlops.namespace" . }}
+{{- end }}
 {{- end }}

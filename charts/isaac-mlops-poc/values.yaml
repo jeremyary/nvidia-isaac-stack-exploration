@@ -41,6 +41,7 @@ minio:
   buckets:
     - mlpipeline
     - mlflow
+    - models
 
 # Data Science Pipelines Application
 dspa:
@@ -127,3 +128,26 @@ tao:
     # Learning rate schedule
     minLearningRate: 5e-06
     maxLearningRate: 5e-04
+
+# Model serving (KServe InferenceService)
+serving:
+  enabled: true
+  # Default serving runtime: "ovms" (pre-installed) or "triton" (NVIDIA)
+  defaultRuntime: ovms
+  # S3 bucket for KServe model repository
+  modelBucket: models
+  ovms:
+    image: quay.io/opendatahub/openvino_model_server:stable
+  triton:
+    image: nvcr.io/nvidia/tritonserver:24.08-py3
+  inference:
+    gpu: 1
+    memory: 8Gi
+    memoryRequest: 4Gi
+  # API key authentication for external inference route.
+  # When disabled, no external route is created (internal-only).
+  auth:
+    enabled: false
+    # API key — auto-generated on first install if left empty.
+    # Retrieve with: oc get secret inference-api-key -n <ns> -o jsonpath='{.data.api-key}' | base64 -d
+    apiKey: ""
