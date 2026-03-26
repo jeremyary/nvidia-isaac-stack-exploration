@@ -1,3 +1,4 @@
+# This project was developed with assistance from AI tools.
 # Namespace for all resources
 namespace: isaac-mlops-poc
 
@@ -60,6 +61,19 @@ mlflow:
   storage:
     size: 5Gi
 
+# RHOAI Model Registry (Kubeflow Model Registry)
+# Deployed in rhoai-model-registries namespace with dedicated Postgres
+modelRegistry:
+  enabled: true
+  name: isaac-registry
+  namespace: rhoai-model-registries
+  database:
+    image: registry.redhat.io/rhel9/postgresql-15:latest
+    user: registry
+    password: registry123  # PoC only
+    name: isaac_registry
+    pvcSize: 1Gi
+
 # Kueue LocalQueue
 kueue:
   enabled: true
@@ -68,8 +82,6 @@ kueue:
 # Isaac Sim data generation
 isaacSim:
   enabled: true
-  # Set to true to deploy the standalone validation Job (Phase 1 testing)
-  testJob: false
   image: nvcr.io/nvidia/isaac-sim:4.5.0
   sdgRepo: https://github.com/NVIDIA-AI-IOT/synthetic_data_generation_training_workflow.git
   gitImage: alpine/git:latest
@@ -92,9 +104,9 @@ isaacSim:
 # TAO Toolkit training
 tao:
   enabled: true
-  # Set to true to deploy the standalone validation Job (Phase 1 testing)
-  testJob: false
   image: nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf1.15.5
+  # ClusterTrainingRuntime name — referenced by pipeline TrainJob steps
+  trainingRuntime: tao-detectnet
   resources:
     limits:
       gpu: 1

@@ -1,3 +1,4 @@
+# This project was developed with assistance from AI tools.
 """Trivial test pipeline to verify DSPA is functional."""
 from kfp import dsl, compiler
 

@@ -11,7 +11,9 @@
 #    map_threshold: float [Default: 0.0]
 #    mlflow_s3_endpoint: str [Default: 'http://minio.isaac-mlops-poc.svc:9000']
 #    mlflow_tracking_uri: str [Default: 'https://mlflow.redhat-ods-applications.svc:8443']
+#    model_registry_url: str [Default: 'http://isaac-registry.rhoai-model-registries.svc.cluster.local']
 #    num_frames: int [Default: 100.0]
+#    training_runtime: str [Default: 'tao-detectnet']
 #    width: int [Default: 960.0]
 components:
   comp-clone-sdg-repo:
@@ -38,6 +40,8 @@ components:
           parameterType: STRING
         mlflow_tracking_uri:
           parameterType: STRING
+        model_registry_url:
+          parameterType: STRING
         num_frames:
           parameterType: NUMBER_INTEGER
         width:
@@ -62,7 +66,7 @@ components:
     executorLabel: exec-train-detectnet
     inputDefinitions:
       parameters:
-        encryption_key:
+        training_runtime:
           parameterType: STRING
 deploymentSpec:
   executors:
@@ -115,9 +119,9 @@ deploymentSpec:
         - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
           \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
           \ python3 -m pip install --quiet --no-warn-script-location 'mlflow>=3.5.0'\
-          \ 'boto3>=1.34.0'  &&  python3 -m pip install --quiet --no-warn-script-location\
-          \ 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"\
-          3.9\"' && \"$0\" \"$@\"\n"
+          \ 'boto3>=1.34.0' 'model-registry>=0.3.0'  &&  python3 -m pip install --quiet\
+          \ --no-warn-script-location 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5;\
+          \ python_version<\"3.9\"' && \"$0\" \"$@\"\n"
         - sh
         - -ec
         - 'program_path=$(mktemp -d)
@@ -130,22 +134,23 @@ deploymentSpec:
           '
         - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
           \ *\n\ndef evaluate_and_register(\n    mlflow_tracking_uri: str,\n    mlflow_s3_endpoint:\
-          \ str,\n    experiment_name: str,\n    num_frames: int,\n    height: int,\n\
-          \    width: int,\n    distractors: str,\n    epochs: int,\n    batch_size:\
-          \ int,\n    map_threshold: float,\n) -> str:\n    \"\"\"Parse training status.json,\
-          \ log metrics to MLflow, register model if mAP > threshold.\"\"\"\n    import\
-          \ json\n    import os\n\n    os.environ[\"MLFLOW_S3_ENDPOINT_URL\"] = mlflow_s3_endpoint\n\
-          \    os.environ[\"AWS_ACCESS_KEY_ID\"] = os.environ.get(\"MINIO_ACCESS_KEY\"\
-          , \"minio\")\n    os.environ[\"AWS_SECRET_ACCESS_KEY\"] = os.environ.get(\"\
-          MINIO_SECRET_KEY\", \"minio123\")\n    os.environ[\"MLFLOW_TRACKING_INSECURE_TLS\"\
-          ] = \"true\"\n    # RHOAI MLflow uses TLS + K8s workspace auth:\n    # -\
-          \ Bearer token from ServiceAccount for authentication\n    # - X-MLFLOW-WORKSPACE\
-          \ header (= pod namespace) for workspace context\n    sa_token_path = \"\
-          /var/run/secrets/kubernetes.io/serviceaccount/token\"\n    sa_ns_path =\
-          \ \"/var/run/secrets/kubernetes.io/serviceaccount/namespace\"\n    if os.path.exists(sa_token_path):\n\
-          \        with open(sa_token_path) as f:\n            os.environ[\"MLFLOW_TRACKING_TOKEN\"\
-          ] = f.read().strip()\n    workspace = \"default\"\n    if os.path.exists(sa_ns_path):\n\
-          \        with open(sa_ns_path) as f:\n            workspace = f.read().strip()\n\
+          \ str,\n    experiment_name: str,\n    model_registry_url: str,\n    num_frames:\
+          \ int,\n    height: int,\n    width: int,\n    distractors: str,\n    epochs:\
+          \ int,\n    batch_size: int,\n    map_threshold: float,\n) -> str:\n   \
+          \ \"\"\"Parse training status.json, log metrics to MLflow, register model\
+          \ if mAP > threshold.\"\"\"\n    import json\n    import os\n\n    os.environ[\"\
+          MLFLOW_S3_ENDPOINT_URL\"] = mlflow_s3_endpoint\n    os.environ[\"AWS_ACCESS_KEY_ID\"\
+          ] = os.environ.get(\"MINIO_ACCESS_KEY\", \"minio\")\n    os.environ[\"AWS_SECRET_ACCESS_KEY\"\
+          ] = os.environ.get(\"MINIO_SECRET_KEY\", \"minio123\")\n    os.environ[\"\
+          MLFLOW_TRACKING_INSECURE_TLS\"] = \"true\"\n    # RHOAI MLflow uses TLS\
+          \ + K8s workspace auth:\n    # - Bearer token from ServiceAccount for authentication\n\
+          \    # - X-MLFLOW-WORKSPACE header (= pod namespace) for workspace context\n\
+          \    sa_token_path = \"/var/run/secrets/kubernetes.io/serviceaccount/token\"\
+          \n    sa_ns_path = \"/var/run/secrets/kubernetes.io/serviceaccount/namespace\"\
+          \n    if os.path.exists(sa_token_path):\n        with open(sa_token_path)\
+          \ as f:\n            os.environ[\"MLFLOW_TRACKING_TOKEN\"] = f.read().strip()\n\
+          \    workspace = \"default\"\n    if os.path.exists(sa_ns_path):\n     \
+          \   with open(sa_ns_path) as f:\n            workspace = f.read().strip()\n\
           \n    import mlflow\n    from mlflow.tracking.request_header.registry import\
           \ _request_header_provider_registry\n\n    class _WorkspaceHeaderProvider:\n\
           \        \"\"\"Injects X-MLFLOW-WORKSPACE header for RHOAI MLflow K8s auth.\"\
@@ -154,29 +159,56 @@ deploymentSpec:
           \n    _request_header_provider_registry.register(_WorkspaceHeaderProvider)\n\
           \n    mlflow.set_tracking_uri(mlflow_tracking_uri)\n    mlflow.set_experiment(experiment_name)\n\
           \n    # Parse training results (TAO writes NDJSON \u2014 one JSON object\
-          \ per line)\n    status_file = \"/workspace/output/resnet18_palletjack/status.json\"\
-          \n    with open(status_file) as f:\n        lines = [line.strip() for line\
-          \ in f if line.strip()]\n    status = json.loads(lines[-1]) if lines else\
-          \ {}\n\n    final_map = 0.0\n    final_loss = 0.0\n    if \"results\" in\
-          \ status:\n        results = status[\"results\"]\n        if isinstance(results,\
-          \ list) and results:\n            last = results[-1]\n            final_map\
-          \ = last.get(\"mean_average_precision\", 0.0)\n            final_loss =\
-          \ last.get(\"loss\", 0.0)\n        elif isinstance(results, dict):\n   \
-          \         final_map = results.get(\"mean_average_precision\", 0.0)\n   \
-          \         final_loss = results.get(\"loss\", 0.0)\n\n    model_path = \"\
-          /workspace/output/resnet18_palletjack/weights/model.hdf5\"\n    model_exists\
-          \ = os.path.exists(model_path)\n\n    print(f\"Final mAP: {final_map}\"\
-          )\n    print(f\"Final loss: {final_loss}\")\n    print(f\"Model exists:\
-          \ {model_exists}\")\n    print(f\"mAP threshold: {map_threshold}\")\n\n\
-          \    with mlflow.start_run() as run:\n        mlflow.log_params({\n    \
-          \        \"num_frames\": num_frames,\n            \"image_height\": height,\n\
-          \            \"image_width\": width,\n            \"distractors\": distractors,\n\
-          \            \"epochs\": epochs,\n            \"batch_size\": batch_size,\n\
-          \            \"architecture\": \"resnet18\",\n            \"detector\":\
-          \ \"detectnet_v2\",\n        })\n\n        mlflow.log_metrics({\n      \
-          \      \"final_map\": final_map,\n            \"final_loss\": final_loss,\n\
-          \        })\n\n        mlflow.log_artifact(status_file, artifact_path=\"\
-          training_output\")\n\n        spec_file = \"/workspace/specs/training_resnet18.txt\"\
+          \ per line).\n    # The status.json is cumulative across all runs on the\
+          \ PVC, so we need to\n    # find the last SUCCESS block and extract metrics\
+          \ from it.\n    # TAO's actual keys: graphical.loss, kpi.mean average precision,\n\
+          \    # categorical.average_precision, kpi.size, kpi.param_count\n    status_file\
+          \ = \"/workspace/output/resnet18_palletjack/status.json\"\n    with open(status_file)\
+          \ as f:\n        entries = [json.loads(line) for line in f if line.strip()]\n\
+          \n    # Find the last training session: walk backwards to the last SUCCESS,\n\
+          \    # then backwards again to its STARTED to get the full session window.\n\
+          \    last_success_idx = None\n    for i in range(len(entries) - 1, -1, -1):\n\
+          \        if entries[i].get(\"status\") == \"SUCCESS\":\n            last_success_idx\
+          \ = i\n            break\n\n    session_start_idx = 0\n    if last_success_idx\
+          \ is not None:\n        for i in range(last_success_idx, -1, -1):\n    \
+          \        if entries[i].get(\"status\") == \"STARTED\":\n               \
+          \ session_start_idx = i\n                break\n        session = entries[session_start_idx:last_success_idx\
+          \ + 1]\n    else:\n        session = entries\n\n    # Extract final metrics\
+          \ from the last entry with kpi data\n    final_map = 0.0\n    final_loss\
+          \ = 0.0\n    model_size_mb = 0.0\n    param_count_m = 0.0\n    per_epoch_metrics\
+          \ = []\n\n    for entry in session:\n        kpi = entry.get(\"kpi\", {})\n\
+          \        graphical = entry.get(\"graphical\", {})\n        epoch = entry.get(\"\
+          epoch\")\n\n        if \"mean average precision\" in kpi:\n            final_map\
+          \ = kpi[\"mean average precision\"]\n        if \"loss\" in graphical:\n\
+          \            final_loss = graphical[\"loss\"]\n        if \"size\" in kpi:\n\
+          \            model_size_mb = kpi[\"size\"]\n        if \"param_count\" in\
+          \ kpi:\n            param_count_m = kpi[\"param_count\"]\n\n        # Collect\
+          \ per-epoch snapshots (entries with an epoch field)\n        if epoch is\
+          \ not None and \"loss\" in graphical:\n            per_epoch_metrics.append({\n\
+          \                \"epoch\": epoch,\n                \"loss\": graphical[\"\
+          loss\"],\n                \"learning_rate\": graphical.get(\"learning_rate\"\
+          , \"\"),\n                \"map\": kpi.get(\"mean average precision\", 0.0),\n\
+          \                \"val_cost\": kpi.get(\"validation cost\", 0.0),\n    \
+          \        })\n\n    model_path = \"/workspace/output/resnet18_palletjack/weights/model.hdf5\"\
+          \n    model_exists = os.path.exists(model_path)\n\n    print(f\"Final mAP:\
+          \ {final_map}\")\n    print(f\"Final loss: {final_loss}\")\n    print(f\"\
+          Model size: {model_size_mb:.1f} MB\")\n    print(f\"Model exists: {model_exists}\"\
+          )\n    print(f\"mAP threshold: {map_threshold}\")\n    print(f\"Epochs with\
+          \ metrics: {len(per_epoch_metrics)}\")\n\n    with mlflow.start_run() as\
+          \ run:\n        mlflow.log_params({\n            \"num_frames\": num_frames,\n\
+          \            \"image_height\": height,\n            \"image_width\": width,\n\
+          \            \"distractors\": distractors,\n            \"epochs\": epochs,\n\
+          \            \"batch_size\": batch_size,\n            \"architecture\":\
+          \ \"resnet18\",\n            \"detector\": \"detectnet_v2\",\n        })\n\
+          \n        mlflow.log_metrics({\n            \"final_map\": final_map,\n\
+          \            \"final_loss\": final_loss,\n            \"model_size_mb\"\
+          : model_size_mb,\n            \"param_count_millions\": param_count_m,\n\
+          \        })\n\n        # Log per-epoch metrics so MLflow can render training\
+          \ curves\n        for em in per_epoch_metrics:\n            mlflow.log_metrics(\n\
+          \                {\"epoch_loss\": em[\"loss\"], \"epoch_map\": em[\"map\"\
+          ],\n                 \"epoch_val_cost\": em[\"val_cost\"]},\n          \
+          \      step=em[\"epoch\"],\n            )\n\n        mlflow.log_artifact(status_file,\
+          \ artifact_path=\"training_output\")\n\n        spec_file = \"/workspace/specs/training_resnet18.txt\"\
           \n        if os.path.exists(spec_file):\n            mlflow.log_artifact(spec_file,\
           \ artifact_path=\"specs\")\n\n        if model_exists and final_map >= map_threshold:\n\
           \            mlflow.log_artifact(model_path, artifact_path=\"model\")\n\
@@ -192,7 +224,24 @@ deploymentSpec:
           \n        else:\n            result = f\"NO_MODEL (model file not found)\"\
           \n\n        mlflow.set_tag(\"result\", result)\n        print(f\"Result:\
           \ {result}\")\n        print(f\"MLflow run ID: {run.info.run_id}\")\n\n\
-          \    return result\n\n"
+          \    # Register in RHOAI Model Registry (Kubeflow Model Registry API)\n\
+          \    if model_exists and final_map >= map_threshold:\n        from model_registry\
+          \ import ModelRegistry\n\n        registry = ModelRegistry(\n          \
+          \  server_address=model_registry_url,\n            port=8080,\n        \
+          \    author=\"isaac-pipeline\",\n            is_secure=False,\n        )\n\
+          \        rm = registry.register_model(\n            \"palletjack-detectnet-v2\"\
+          ,\n            f\"runs:/{run.info.run_id}/model\",\n            model_format_name=\"\
+          hdf5\",\n            model_format_version=\"1\",\n            version=run.info.run_id[:8],\n\
+          \            description=(\n                f\"DetectNet_v2 ResNet-18 palletjack\
+          \ detector. \"\n                f\"mAP={final_map:.4f}, loss={final_loss:.6f},\
+          \ \"\n                f\"{num_frames} frames, {epochs} epochs.\"\n     \
+          \       ),\n            metadata={\n                \"mlflow_run_id\": run.info.run_id,\n\
+          \                \"final_map\": final_map,\n                \"final_loss\"\
+          : final_loss,\n                \"model_size_mb\": model_size_mb,\n     \
+          \           \"num_frames\": num_frames,\n                \"epochs\": epochs,\n\
+          \                \"batch_size\": batch_size,\n                \"distractors\"\
+          : distractors,\n            },\n        )\n        print(f\"RHOAI Model\
+          \ Registry: registered {rm.name}\")\n\n    return result\n\n"
         image: registry.access.redhat.com/ubi9/python-311:latest
     exec-generate-synthetic-data:
       container:
@@ -234,31 +283,45 @@ deploymentSpec:
     exec-train-detectnet:
       container:
         args:
-        - -c
-        - echo '=== TAO DetectNet_v2 Training ===' && nvidia-smi && mkdir -p /workspace/pretrained
-          /workspace/output/resnet18_palletjack && wget -q --content-disposition 'https://api.ngc.nvidia.com/v2/models/nvidia/tao/pretrained_detectnet_v2/versions/resnet18/files/resnet18.hdf5'
-          -O /workspace/pretrained/resnet18.hdf5 && detectnet_v2 train -e /workspace/specs/training_resnet18.txt
-          -r /workspace/output/resnet18_palletjack -k "$1" --gpus 1 && echo '=== Training
-          complete ===' && find /workspace/output/ -type f | head -20 && ls -la /workspace/output/resnet18_palletjack/weights/
-        - --
-        - '{{$.inputs.parameters[''encryption_key'']}}'
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - train_detectnet
         command:
-        - /bin/bash
-        image: nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf1.15.5
-        resources:
-          accelerator:
-            count: '1'
-            resourceCount: '1'
-            resourceType: nvidia.com/gpu
-            type: nvidia.com/gpu
-          cpuLimit: 8.0
-          cpuRequest: 4.0
-          memoryLimit: 34.359738368
-          memoryRequest: 17.179869184
-          resourceCpuLimit: '8'
-          resourceCpuRequest: '4'
-          resourceMemoryLimit: 32Gi
-          resourceMemoryRequest: 16Gi
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kubeflow==0.4.0'\
+          \  &&  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef train_detectnet(\n    training_runtime: str,\n):\n    \"\"\"\
+          Launch TAO DetectNet_v2 training as a TrainJob and wait for completion.\n\
+          \n    Uses the Kubeflow Trainer v2 SDK (TrainerClient) to create a TrainJob\n\
+          \    referencing a pre-configured TrainingRuntime. The runtime defines\n\
+          \    the container image, GPU resources, PVC mounts, and training command.\n\
+          \    \"\"\"\n    from kubeflow.trainer import TrainerClient\n\n    client\
+          \ = TrainerClient()\n\n    # Create a TrainJob referencing the namespace-scoped\
+          \ TrainingRuntime.\n    # No trainer override needed \u2014 the runtime\
+          \ has the full workload spec.\n    job_name = client.train(runtime=training_runtime)\n\
+          \    print(f\"Created TrainJob {job_name}\")\n\n    # Poll until the TrainJob\
+          \ completes (1 hour timeout).\n    print(\"Waiting for TrainJob to complete...\"\
+          )\n    client.wait_for_job_status(\n        name=job_name,\n        status={\"\
+          Complete\"},\n        timeout=3600,\n        polling_interval=10,\n    )\n\
+          \    print(f\"TrainJob {job_name} completed successfully\")\n\n"
+        image: registry.access.redhat.com/ubi9/python-311:latest
 pipelineInfo:
   description: Synthetic data generation with Isaac Sim Replicator, model training
     with TAO DetectNet_v2, and experiment tracking + model registration with MLflow.
@@ -307,6 +370,8 @@ root:
               componentInputParameter: mlflow_s3_endpoint
             mlflow_tracking_uri:
               componentInputParameter: mlflow_tracking_uri
+            model_registry_url:
+              componentInputParameter: model_registry_url
             num_frames:
               componentInputParameter: num_frames
             width:
@@ -341,8 +406,8 @@ root:
         - convert-to-tfrecords
         inputs:
           parameters:
-            encryption_key:
-              componentInputParameter: encryption_key
+            training_runtime:
+              componentInputParameter: training_runtime
         taskInfo:
           name: train-detectnet
   inputDefinitions:
@@ -383,10 +448,18 @@ root:
         defaultValue: https://mlflow.redhat-ods-applications.svc:8443
         isOptional: true
         parameterType: STRING
+      model_registry_url:
+        defaultValue: http://isaac-registry.rhoai-model-registries.svc.cluster.local
+        isOptional: true
+        parameterType: STRING
       num_frames:
         defaultValue: 100.0
         isOptional: true
         parameterType: NUMBER_INTEGER
+      training_runtime:
+        defaultValue: tao-detectnet
+        isOptional: true
+        parameterType: STRING
       width:
         defaultValue: 960.0
         isOptional: true
@@ -490,54 +563,6 @@ platforms:
             pvcNameParameter:
               runtimeValue:
                 constant: synthetic-data
-          tolerations:
-          - effect: NoSchedule
-            key: nvidia.com/gpu
-            operator: Exists
-        exec-train-detectnet:
-          configMapAsVolume:
-          - configMapName: tao-specs
-            configMapNameParameter:
-              runtimeValue:
-                constant: tao-specs
-            mountPath: /workspace/specs
-            optional: false
-          emptyDirMounts:
-          - mountPath: /workspace/pretrained
-            volumeName: pretrained
-          imagePullSecret:
-          - secretName: ngc-secret
-            secretNameParameter:
-              runtimeValue:
-                constant: ngc-secret
-          nodeSelector:
-            labels:
-              nvidia.com/gpu.product: NVIDIA-L40S
-          pvcMount:
-          - constant: synthetic-data
-            mountPath: /workspace/data
-            pvcNameParameter:
-              runtimeValue:
-                constant: synthetic-data
-          - constant: model-artifacts
-            mountPath: /workspace/output
-            pvcNameParameter:
-              runtimeValue:
-                constant: model-artifacts
-          - constant: tfrecords
-            mountPath: /workspace/tfrecords
-            pvcNameParameter:
-              runtimeValue:
-                constant: tfrecords
-          secretAsEnv:
-          - keyToEnv:
-            - envVar: NGC_API_KEY
-              secretKey: NGC_API_KEY
-            optional: false
-            secretName: ngc-api-key
-            secretNameParameter:
-              runtimeValue:
-                constant: ngc-api-key
           tolerations:
           - effect: NoSchedule
             key: nvidia.com/gpu

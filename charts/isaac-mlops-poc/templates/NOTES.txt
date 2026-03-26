@@ -22,6 +22,17 @@ Isaac MLOps PoC deployed to namespace: {{ include "isaac-mlops.namespace" . }}
   UI:       https://data-science-gateway.<cluster-domain>/mlflow
   Internal: {{ .Values.mlflow.trackingUri }} (for pipeline steps)
 
+=== Training ===
+
+  ClusterTrainingRuntime: tao-detectnet (Kubeflow Trainer v2)
+  Training Jobs visible in RHOAI dashboard under Training Jobs tab
+  GPU node selector: {{ .Values.gpu.product }}
+
+=== Model Registry ===
+
+  Name:     {{ .Values.modelRegistry.name }}
+  Internal: http://{{ .Values.modelRegistry.name }}.{{ .Values.modelRegistry.namespace }}.svc.cluster.local:8080
+
 === Key resources ===
 
   PVCs:     synthetic-data ({{ .Values.storage.syntheticData.size }}), model-artifacts ({{ .Values.storage.modelArtifacts.size }}), tfrecords ({{ .Values.storage.tfrecords.size }})

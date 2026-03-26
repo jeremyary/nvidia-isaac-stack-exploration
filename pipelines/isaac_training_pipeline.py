@@ -1,3 +1,4 @@
+# This project was developed with assistance from AI tools.
 """
 End-to-end pipeline: Isaac Sim synthetic data generation → TAO training → MLflow registration.
 
@@ -85,33 +86,39 @@ def convert_to_tfrecords():
 
 
 # ---------------------------------------------------------------------------
-# Step 4: Train DetectNet_v2
+# Step 4: Train DetectNet_v2 via Kubeflow Trainer (TrainJob)
 # ---------------------------------------------------------------------------
-@dsl.container_component
-def train_detectnet(encryption_key: str):
-    return dsl.ContainerSpec(
-        image="nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf1.15.5",
-        command=["/bin/bash"],
-        args=[
-            "-c",
-            "echo '=== TAO DetectNet_v2 Training ===' && nvidia-smi && "
-            "mkdir -p /workspace/pretrained /workspace/output/resnet18_palletjack && "
-            "wget -q --content-disposition "
-            "'https://api.ngc.nvidia.com/v2/models/nvidia/tao/pretrained_detectnet_v2"
-            "/versions/resnet18/files/resnet18.hdf5' "
-            "-O /workspace/pretrained/resnet18.hdf5 && "
-            "detectnet_v2 train "
-            "-e /workspace/specs/training_resnet18.txt "
-            "-r /workspace/output/resnet18_palletjack "
-            '-k "$1" '
-            "--gpus 1 && "
-            "echo '=== Training complete ===' && "
-            "find /workspace/output/ -type f | head -20 && "
-            "ls -la /workspace/output/resnet18_palletjack/weights/",
-            "--",
-            encryption_key,
-        ],
+@dsl.component(
+    base_image="registry.access.redhat.com/ubi9/python-311:latest",
+    packages_to_install=["kubeflow==0.4.0"],
+)
+def train_detectnet(
+    training_runtime: str,
+):
+    """Launch TAO DetectNet_v2 training as a TrainJob and wait for completion.
+
+    Uses the Kubeflow Trainer v2 SDK (TrainerClient) to create a TrainJob
+    referencing a pre-configured TrainingRuntime. The runtime defines
+    the container image, GPU resources, PVC mounts, and training command.
+    """
+    from kubeflow.trainer import TrainerClient
+
+    client = TrainerClient()
+
+    # Create a TrainJob referencing the namespace-scoped TrainingRuntime.
+    # No trainer override needed — the runtime has the full workload spec.
+    job_name = client.train(runtime=training_runtime)
+    print(f"Created TrainJob {job_name}")
+
+    # Poll until the TrainJob completes (1 hour timeout).
+    print("Waiting for TrainJob to complete...")
+    client.wait_for_job_status(
+        name=job_name,
+        status={"Complete"},
+        timeout=3600,
+        polling_interval=10,
     )
+    print(f"TrainJob {job_name} completed successfully")
 
 
 # ---------------------------------------------------------------------------
@@ -119,12 +126,13 @@ def train_detectnet(encryption_key: str):
 # ---------------------------------------------------------------------------
 @dsl.component(
     base_image="registry.access.redhat.com/ubi9/python-311:latest",
-    packages_to_install=["mlflow>=3.5.0", "boto3>=1.34.0"],
+    packages_to_install=["mlflow>=3.5.0", "boto3>=1.34.0", "model-registry>=0.3.0"],
 )
 def evaluate_and_register(
     mlflow_tracking_uri: str,
     mlflow_s3_endpoint: str,
     experiment_name: str,
+    model_registry_url: str,
     num_frames: int,
     height: int,
     width: int,
@@ -169,31 +177,73 @@ def evaluate_and_register(
     mlflow.set_tracking_uri(mlflow_tracking_uri)
     mlflow.set_experiment(experiment_name)
 
-    # Parse training results (TAO writes NDJSON — one JSON object per line)
+    # Parse training results (TAO writes NDJSON — one JSON object per line).
+    # The status.json is cumulative across all runs on the PVC, so we need to
+    # find the last SUCCESS block and extract metrics from it.
+    # TAO's actual keys: graphical.loss, kpi.mean average precision,
+    # categorical.average_precision, kpi.size, kpi.param_count
     status_file = "/workspace/output/resnet18_palletjack/status.json"
     with open(status_file) as f:
-        lines = [line.strip() for line in f if line.strip()]
-    status = json.loads(lines[-1]) if lines else {}
+        entries = [json.loads(line) for line in f if line.strip()]
 
+    # Find the last training session: walk backwards to the last SUCCESS,
+    # then backwards again to its STARTED to get the full session window.
+    last_success_idx = None
+    for i in range(len(entries) - 1, -1, -1):
+        if entries[i].get("status") == "SUCCESS":
+            last_success_idx = i
+            break
+
+    session_start_idx = 0
+    if last_success_idx is not None:
+        for i in range(last_success_idx, -1, -1):
+            if entries[i].get("status") == "STARTED":
+                session_start_idx = i
+                break
+        session = entries[session_start_idx:last_success_idx + 1]
+    else:
+        session = entries
+
+    # Extract final metrics from the last entry with kpi data
     final_map = 0.0
     final_loss = 0.0
-    if "results" in status:
-        results = status["results"]
-        if isinstance(results, list) and results:
-            last = results[-1]
-            final_map = last.get("mean_average_precision", 0.0)
-            final_loss = last.get("loss", 0.0)
-        elif isinstance(results, dict):
-            final_map = results.get("mean_average_precision", 0.0)
-            final_loss = results.get("loss", 0.0)
+    model_size_mb = 0.0
+    param_count_m = 0.0
+    per_epoch_metrics = []
+
+    for entry in session:
+        kpi = entry.get("kpi", {})
+        graphical = entry.get("graphical", {})
+        epoch = entry.get("epoch")
+
+        if "mean average precision" in kpi:
+            final_map = kpi["mean average precision"]
+        if "loss" in graphical:
+            final_loss = graphical["loss"]
+        if "size" in kpi:
+            model_size_mb = kpi["size"]
+        if "param_count" in kpi:
+            param_count_m = kpi["param_count"]
+
+        # Collect per-epoch snapshots (entries with an epoch field)
+        if epoch is not None and "loss" in graphical:
+            per_epoch_metrics.append({
+                "epoch": epoch,
+                "loss": graphical["loss"],
+                "learning_rate": graphical.get("learning_rate", ""),
+                "map": kpi.get("mean average precision", 0.0),
+                "val_cost": kpi.get("validation cost", 0.0),
+            })
 
     model_path = "/workspace/output/resnet18_palletjack/weights/model.hdf5"
     model_exists = os.path.exists(model_path)
 
     print(f"Final mAP: {final_map}")
     print(f"Final loss: {final_loss}")
+    print(f"Model size: {model_size_mb:.1f} MB")
     print(f"Model exists: {model_exists}")
     print(f"mAP threshold: {map_threshold}")
+    print(f"Epochs with metrics: {len(per_epoch_metrics)}")
 
     with mlflow.start_run() as run:
         mlflow.log_params({
@@ -210,7 +260,17 @@ def evaluate_and_register(
         mlflow.log_metrics({
             "final_map": final_map,
             "final_loss": final_loss,
+            "model_size_mb": model_size_mb,
+            "param_count_millions": param_count_m,
         })
+
+        # Log per-epoch metrics so MLflow can render training curves
+        for em in per_epoch_metrics:
+            mlflow.log_metrics(
+                {"epoch_loss": em["loss"], "epoch_map": em["map"],
+                 "epoch_val_cost": em["val_cost"]},
+                step=em["epoch"],
+            )
 
         mlflow.log_artifact(status_file, artifact_path="training_output")
 
@@ -240,6 +300,40 @@ def evaluate_and_register(
         mlflow.set_tag("result", result)
         print(f"Result: {result}")
         print(f"MLflow run ID: {run.info.run_id}")
+
+    # Register in RHOAI Model Registry (Kubeflow Model Registry API)
+    if model_exists and final_map >= map_threshold:
+        from model_registry import ModelRegistry
+
+        registry = ModelRegistry(
+            server_address=model_registry_url,
+            port=8080,
+            author="isaac-pipeline",
+            is_secure=False,
+        )
+        rm = registry.register_model(
+            "palletjack-detectnet-v2",
+            f"runs:/{run.info.run_id}/model",
+            model_format_name="hdf5",
+            model_format_version="1",
+            version=run.info.run_id[:8],
+            description=(
+                f"DetectNet_v2 ResNet-18 palletjack detector. "
+                f"mAP={final_map:.4f}, loss={final_loss:.6f}, "
+                f"{num_frames} frames, {epochs} epochs."
+            ),
+            metadata={
+                "mlflow_run_id": run.info.run_id,
+                "final_map": final_map,
+                "final_loss": final_loss,
+                "model_size_mb": model_size_mb,
+                "num_frames": num_frames,
+                "epochs": epochs,
+                "batch_size": batch_size,
+                "distractors": distractors,
+            },
+        )
+        print(f"RHOAI Model Registry: registered {rm.name}")
 
     return result
 
@@ -325,10 +419,12 @@ def isaac_training_pipeline(
     distractors: str = "warehouse",
     epochs: int = 2,
     batch_size: int = 4,
+    training_runtime: str = "tao-detectnet",
     encryption_key: str = "tao_key",
     mlflow_tracking_uri: str = "https://mlflow.redhat-ods-applications.svc:8443",
     mlflow_s3_endpoint: str = "http://minio.isaac-mlops-poc.svc:9000",
     experiment_name: str = "palletjack-detectnet-v2",
+    model_registry_url: str = "http://isaac-registry.rhoai-model-registries.svc.cluster.local",
     map_threshold: float = 0.0,
 ):
     # -- Step 1: Clone SDG repo to workspace PVC --
@@ -362,27 +458,20 @@ def isaac_training_pipeline(
     _configure_gpu(convert_task)
     kubernetes.set_image_pull_secrets(convert_task, ["ngc-secret"])
 
-    # -- Step 4: Train DetectNet_v2 (GPU) --
+    # -- Step 4: Train DetectNet_v2 via TrainJob (Kubeflow Trainer) --
+    # Creates a TrainJob referencing a pre-configured TrainingRuntime.
+    # The runtime defines the full workload spec (GPU, PVCs, command).
+    # The launcher pod only needs the Kubeflow SDK — no GPU required.
     train_task = train_detectnet(
-        encryption_key=encryption_key,
+        training_runtime=training_runtime,
     ).after(convert_task)
-    _configure_pvc(
-        train_task,
-        synthetic_data=True, model_artifacts=True, specs=True,
-        tfrecords=True, pretrained=True,
-    )
-    _configure_gpu(train_task)
-    kubernetes.set_image_pull_secrets(train_task, ["ngc-secret"])
-    kubernetes.use_secret_as_env(
-        train_task, secret_name="ngc-api-key",
-        secret_key_to_env={"NGC_API_KEY": "NGC_API_KEY"},
-    )
 
-    # -- Step 5: Evaluate + register in MLflow (no GPU) --
+    # -- Step 5: Evaluate + register in MLflow + RHOAI Model Registry (no GPU) --
     eval_task = evaluate_and_register(
         mlflow_tracking_uri=mlflow_tracking_uri,
         mlflow_s3_endpoint=mlflow_s3_endpoint,
         experiment_name=experiment_name,
+        model_registry_url=model_registry_url,
         num_frames=num_frames,
         height=height,
         width=width,

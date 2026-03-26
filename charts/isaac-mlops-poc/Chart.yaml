@@ -1,3 +1,4 @@
+# This project was developed with assistance from AI tools.
 apiVersion: v2
 name: isaac-mlops-poc
 description: MLOps infrastructure for NVIDIA Isaac Sim + TAO Toolkit on OpenShift

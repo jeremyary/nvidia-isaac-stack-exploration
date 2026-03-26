@@ -11,15 +11,16 @@ Takes the manual process from NVIDIA's Isaac [Sim Module 3](https://docs.nvidia.
 
 ```
 Isaac Sim (generate synthetic palletjack images)
-  → TAO Toolkit (convert to TFRecords, train DetectNet_v2)
-    → MLflow (log metrics, register model if mAP > threshold)
+  → TAO Toolkit (convert to TFRecords)
+    → Kubeflow Trainer (train DetectNet_v2 as a TrainJob)
+      → MLflow + Model Registry (log metrics, register model if mAP > threshold)
 ```
 
-All orchestrated by Data Science Pipelines (KFP v2) on OpenShift with GPU scheduling via the NVIDIA GPU Operator.
+All orchestrated by Data Science Pipelines (KFP v2) on OpenShift AI with GPU scheduling via the NVIDIA GPU Operator. Training jobs are visible in the RHOAI Training Jobs dashboard.
 
 ## Prerequisites
 
-- OpenShift 4.x with RHOAI 3.3+ (DSPA, MLflow operator, Kueue)
+- OpenShift 4.x with RHOAI 3.3+ (DSPA, MLflow operator, Kueue, Kubeflow Trainer)
 - NVIDIA GPU Operator with an L40S or equivalent GPU node
 - NGC API key ([get one here](https://org.ngc.nvidia.com/setup/api-key))
 - TAO Toolkit EULA accepted on [NGC catalog](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/tao/containers/tao-toolkit)
@@ -56,6 +57,7 @@ python pipelines/isaac_training_pipeline.py
 | `num_frames` | 100 | Synthetic images to generate (5000 for production) |
 | `epochs` | 2 | Training epochs (80-100 for production) |
 | `batch_size` | 4 | Images per GPU batch |
+| `training_runtime` | tao-detectnet | ClusterTrainingRuntime for Kubeflow Trainer |
 | `map_threshold` | 0.0 | Minimum mAP to register the model |
 | `gpu.product` | NVIDIA-L40S | GPU node selector label |
 

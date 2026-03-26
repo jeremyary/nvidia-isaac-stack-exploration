@@ -1,3 +1,4 @@
+# This project was developed with assistance from AI tools.
 {{- if .Values.dspa.enabled }}
 # Grant anyuid SCC to the DSPA pipeline runner SA.
 # NVIDIA containers (Isaac Sim, TAO Toolkit) require root access.
@@ -47,6 +48,54 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: mlflow-operator-mlflow-view
+subjects:
+- kind: ServiceAccount
+  name: pipeline-runner-isaac-pipelines
+  namespace: {{ include "isaac-mlops.namespace" . }}
+{{- end }}
+{{- if .Values.tao.enabled }}
+---
+# Kubeflow Trainer v2 — allows pipeline steps to create, monitor, and
+# clean up TrainJob resources for GPU training (shows in RHOAI dashboard).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pipeline-runner-trainjob-edit
+  namespace: {{ include "isaac-mlops.namespace" . }}
+  labels:
+    {{- include "isaac-mlops.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kueue-trainjob-editor-role
+subjects:
+- kind: ServiceAccount
+  name: pipeline-runner-isaac-pipelines
+  namespace: {{ include "isaac-mlops.namespace" . }}
+---
+# ClusterTrainingRuntime read access — allows the Kubeflow TrainerClient SDK
+# to look up the ClusterTrainingRuntime referenced by each TrainJob.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-training-runtime-reader
+  labels:
+    {{- include "isaac-mlops.labels" . | nindent 4 }}
+rules:
+- apiGroups: ["trainer.kubeflow.org"]
+  resources: ["clustertrainingruntimes"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "isaac-mlops.namespace" . }}-runtime-reader
+  labels:
+    {{- include "isaac-mlops.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-training-runtime-reader
 subjects:
 - kind: ServiceAccount
   name: pipeline-runner-isaac-pipelines

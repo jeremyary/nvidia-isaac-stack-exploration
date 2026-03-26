@@ -1,3 +1,4 @@
+# This project was developed with assistance from AI tools.
 {{- if .Values.tao.enabled }}
 apiVersion: v1
 kind: ConfigMap
