@@ -67,3 +67,17 @@ python pipelines/isaac_training_pipeline.py
 |-------|---------|------|
 | `nvcr.io/nvidia/isaac-sim:4.5.0` | Synthetic data generation (Replicator) | ~15GB |
 | `nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf1.15.5` | TFRecord conversion + DetectNet_v2 training | ~8GB |
+
+## Screenshots
+
+### Pipeline Definitions
+![Pipeline definitions in RHOAI dashboard](images/pipelines.png)
+
+### Pipeline Runs
+![Pipeline run history](images/pipeline-runs.png)
+
+### Training Jobs
+![Kubeflow Trainer v2 TrainJob in RHOAI Training Jobs dashboard](images/training.png)
+
+### Experiments
+![Pipeline experiments in RHOAI dashboard](images/experiments.png)
