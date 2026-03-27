@@ -18,6 +18,8 @@ Isaac Sim (generate synthetic palletjack images)
           → KServe InferenceService (deploy ONNX model via OVMS)
 ```
 
+A second pipeline adds **Cosmos Transfer2.5 sim-to-real augmentation** between data generation and training — transforming synthetic images into photorealistic variations using depth, edge, and segmentation control maps.
+
 All orchestrated by Data Science Pipelines (KFP v2) on OpenShift AI with GPU scheduling via the NVIDIA GPU Operator. Training jobs are visible in the RHOAI Training Jobs dashboard. The trained model is automatically exported to ONNX and deployed as a live inference endpoint via OpenVINO Model Server (OVMS).
 
 ## Prerequisites
@@ -26,6 +28,7 @@ All orchestrated by Data Science Pipelines (KFP v2) on OpenShift AI with GPU sch
 - NVIDIA GPU Operator with an L40S or equivalent GPU node
 - NGC API key ([get one here](https://org.ngc.nvidia.com/setup/api-key))
 - TAO Toolkit EULA accepted on [NGC catalog](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/tao/containers/tao-toolkit)
+- (Cosmos pipeline only) H100 80GB GPU — see [Cosmos Transfer GPU Requirements](#cosmos-transfer-sim-to-real-augmentation)
 
 ## Quick Start
 
@@ -71,6 +74,8 @@ python pipelines/isaac_training_pipeline.py
 |-------|---------|------|
 | `nvcr.io/nvidia/isaac-sim:4.5.0` | Synthetic data generation (Replicator) | ~15GB |
 | `nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf1.15.5` | TFRecord conversion + DetectNet_v2 training | ~8GB |
+| `nvcr.io/nim/nvidia/cosmos-transfer2.5-2b:1.0.0` | Sim-to-real augmentation NIM (H100 required) | ~15GB |
+| `quay.io/jary/cosmos-prep:latest` | Control map preparation + augmentation client | ~500MB |
 
 ## Parameter Sweep
 
@@ -141,6 +146,62 @@ oc get secret inference-api-key -n isaac-mlops-poc \
 curl -H "X-API-Key: <key>" \
   https://inference-gateway-isaac-mlops-poc.apps.<cluster-domain>/v2/models/palletjack-detectnet-v2
 ```
+
+## Cosmos Transfer Sim-to-Real Augmentation
+
+The Cosmos pipeline (`pipelines/isaac_cosmos_pipeline.py`) extends the base pipeline by adding NVIDIA Cosmos Transfer2.5 between data generation and training. Cosmos transforms synthetic images into photorealistic variations using control maps (edge, depth, segmentation) derived from Isaac Sim Replicator output, effectively doubling the training dataset.
+
+### Architecture
+
+```
+Isaac Sim Replicator output (RGB + depth + segmentation + labels)
+  → Prepare control maps (chunk into video clips, compute edge maps)
+    → Cosmos Transfer2.5 (edge-guided sim-to-real transformation)
+      → Merge original + augmented data
+        → TFRecords → Train → Export → Deploy
+```
+
+### GPU Requirements
+
+Cosmos Transfer2.5 (2B parameters) requires **H100 80GB** for inference:
+
+| GPU | VRAM | Status |
+|-----|------|--------|
+| L40S (48GB) | 44.4 GiB usable | **OOM during FP8 calibration** — NIM's fallback profile triggers from-scratch TensorRT engine building which exceeds VRAM during quantization calibration |
+| H100 SXM (80GB) | 80 GiB | **Works** — has pre-built optimized FP8 profiles, no calibration needed |
+| H100 NVL (94GB) | 94 GiB | **Works** — extra headroom |
+
+The NIM support matrix lists only H100/H200 as supported GPUs. L40S falls into "fallback" territory requiring >100GB combined VRAM. The HuggingFace model (BF16 inference without NIM) requires ~65GB VRAM.
+
+### Out-of-Band Workflow
+
+When H100 nodes are unavailable in the cluster (e.g., EC2 capacity constraints), Cosmos augmentation can run out-of-band on an external GPU:
+
+```bash
+# 1. Extract synthetic data from cluster PVC
+oc run pvc-access --image=ubi9 --overrides='...' -n isaac-mlops-poc
+oc cp isaac-mlops-poc/pvc-access:/data/palletjack_data /tmp/palletjack_data
+
+# 2. Upload to external GPU instance (vast.ai, Lambda, etc.)
+scp -r /tmp/palletjack_data root@<gpu-host>:~/data/
+
+# 3. Run augmentation (~30 min on H100, ~$2 on vast.ai)
+export HF_TOKEN=hf_xxxxx
+bash scripts/vastai_cosmos_augment.sh
+
+# 4. Download results and upload to cluster PVC
+scp root@<gpu-host>:~/data/cosmos_augmented.tar.gz /tmp/
+oc cp /tmp/cosmos_augmented isaac-mlops-poc/pvc-access:/data/cosmos_augmented
+```
+
+The `scripts/vastai_cosmos_augment.sh` script is self-contained — it installs dependencies, downloads the model from HuggingFace, prepares control maps, runs inference via the `diffusers` library, and packages results. It bypasses the NIM container entirely, using the open-weight model directly in BF16.
+
+### Key Findings
+
+- **FP8 calibration is the bottleneck**, not model weights. The 2B model's weights are only ~4GB, but NIM's on-the-fly TensorRT engine building peaks at ~45GB on L40S.
+- **TRT engines are architecture-specific** — an engine built on Hopper (SM 90) won't run on Ada Lovelace (SM 89). There's no way to pre-build on one GPU and deploy on another.
+- **NIM's `CosmosSafetyChecker` requires `cosmos_guardrail` + LlamaGuard access** — a hidden dependency chain that complicates deployment. The safety checker can be bypassed for PoC use.
+- **The out-of-band approach is production-viable** for teams without H100 nodes, costing ~$2 per augmentation run on spot GPU instances.
 
 ## Screenshots
 

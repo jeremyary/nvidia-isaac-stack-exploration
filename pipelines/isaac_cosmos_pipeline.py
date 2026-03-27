@@ -134,10 +134,20 @@ def deploy_cosmos_nim(
                                 ),
                             ),
                         ),
+                        # Reduce PyTorch CUDA memory fragmentation during FP8 calibration.
+                        # Without this, calibration OOMs on L40S due to ~5GB reserved-but-unused.
+                        client.V1EnvVar(
+                            name="PYTORCH_ALLOC_CONF",
+                            value="expandable_segments:True",
+                        ),
                     ],
                     volume_mounts=[
                         client.V1VolumeMount(
                             name="shm", mount_path="/dev/shm",
+                        ),
+                        # Cache built TRT engines so subsequent starts skip calibration
+                        client.V1VolumeMount(
+                            name="nim-cache", mount_path="/opt/nim/.cache",
                         ),
                     ],
                     readiness_probe=client.V1Probe(
@@ -156,7 +166,15 @@ def deploy_cosmos_nim(
                         medium="Memory", size_limit="32Gi",
                     ),
                 ),
+                client.V1Volume(
+                    name="nim-cache",
+                    persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
+                        claim_name="nim-cache",
+                    ),
+                ),
             ],
+            # NIM runs as UID 1000; fsGroup ensures PVC is group-writable
+            security_context=client.V1PodSecurityContext(fs_group=1000),
             node_selector={"nvidia.com/gpu.product": gpu_product},
             tolerations=[
                 client.V1Toleration(
@@ -859,7 +877,7 @@ def isaac_cosmos_pipeline(
     # -- Step 4: Deploy Cosmos Transfer NIM (no GPU for launcher) --
     deploy_nim_task = deploy_cosmos_nim(
         namespace="isaac-mlops-poc",
-        gpu_product="NVIDIA-L40S",
+        gpu_product="NVIDIA-H100-80GB-HBM3",
     ).after(prep_task)
 
     # -- Step 5: Run Cosmos augmentation (no GPU — calls NIM API) --

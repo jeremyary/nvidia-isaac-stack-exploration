@@ -237,26 +237,41 @@ deploymentSpec:
           \               name=\"ngc-api-key\",\n                                \
           \    key=\"NGC_API_KEY\",\n                                ),\n        \
           \                    ),\n                        ),\n                  \
-          \  ],\n                    volume_mounts=[\n                        client.V1VolumeMount(\n\
-          \                            name=\"shm\", mount_path=\"/dev/shm\",\n  \
-          \                      ),\n                    ],\n                    readiness_probe=client.V1Probe(\n\
-          \                        http_get=client.V1HTTPGetAction(\n            \
-          \                path=\"/v1/health/ready\", port=8000,\n               \
-          \         ),\n                        initial_delay_seconds=30,\n      \
-          \                  period_seconds=10,\n                    ),\n        \
-          \        ),\n            ],\n            volumes=[\n                client.V1Volume(\n\
-          \                    name=\"shm\",\n                    empty_dir=client.V1EmptyDirVolumeSource(\n\
-          \                        medium=\"Memory\", size_limit=\"32Gi\",\n     \
-          \               ),\n                ),\n            ],\n            node_selector={\"\
-          nvidia.com/gpu.product\": gpu_product},\n            tolerations=[\n   \
-          \             client.V1Toleration(\n                    key=\"nvidia.com/gpu\"\
-          , operator=\"Exists\", effect=\"NoSchedule\",\n                ),\n    \
-          \        ],\n            image_pull_secrets=[\n                client.V1LocalObjectReference(name=\"\
-          ngc-secret\"),\n            ],\n            restart_policy=\"Never\",\n\
-          \        ),\n    )\n\n    try:\n        v1.delete_namespaced_pod(pod_name,\
-          \ namespace)\n        print(f\"Deleted existing pod {pod_name}, waiting\
-          \ for cleanup...\")\n        time.sleep(10)\n    except client.exceptions.ApiException\
-          \ as e:\n        if e.status != 404:\n            raise\n\n    v1.create_namespaced_pod(namespace=namespace,\
+          \      # Reduce PyTorch CUDA memory fragmentation during FP8 calibration.\n\
+          \                        # Without this, calibration OOMs on L40S due to\
+          \ ~5GB reserved-but-unused.\n                        client.V1EnvVar(\n\
+          \                            name=\"PYTORCH_ALLOC_CONF\",\n            \
+          \                value=\"expandable_segments:True\",\n                 \
+          \       ),\n                    ],\n                    volume_mounts=[\n\
+          \                        client.V1VolumeMount(\n                       \
+          \     name=\"shm\", mount_path=\"/dev/shm\",\n                        ),\n\
+          \                        # Cache built TRT engines so subsequent starts\
+          \ skip calibration\n                        client.V1VolumeMount(\n    \
+          \                        name=\"nim-cache\", mount_path=\"/opt/nim/.cache\"\
+          ,\n                        ),\n                    ],\n                \
+          \    readiness_probe=client.V1Probe(\n                        http_get=client.V1HTTPGetAction(\n\
+          \                            path=\"/v1/health/ready\", port=8000,\n   \
+          \                     ),\n                        initial_delay_seconds=30,\n\
+          \                        period_seconds=10,\n                    ),\n  \
+          \              ),\n            ],\n            volumes=[\n             \
+          \   client.V1Volume(\n                    name=\"shm\",\n              \
+          \      empty_dir=client.V1EmptyDirVolumeSource(\n                      \
+          \  medium=\"Memory\", size_limit=\"32Gi\",\n                    ),\n   \
+          \             ),\n                client.V1Volume(\n                   \
+          \ name=\"nim-cache\",\n                    persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(\n\
+          \                        claim_name=\"nim-cache\",\n                   \
+          \ ),\n                ),\n            ],\n            # NIM runs as UID\
+          \ 1000; fsGroup ensures PVC is group-writable\n            security_context=client.V1PodSecurityContext(fs_group=1000),\n\
+          \            node_selector={\"nvidia.com/gpu.product\": gpu_product},\n\
+          \            tolerations=[\n                client.V1Toleration(\n     \
+          \               key=\"nvidia.com/gpu\", operator=\"Exists\", effect=\"NoSchedule\"\
+          ,\n                ),\n            ],\n            image_pull_secrets=[\n\
+          \                client.V1LocalObjectReference(name=\"ngc-secret\"),\n \
+          \           ],\n            restart_policy=\"Never\",\n        ),\n    )\n\
+          \n    try:\n        v1.delete_namespaced_pod(pod_name, namespace)\n    \
+          \    print(f\"Deleted existing pod {pod_name}, waiting for cleanup...\"\
+          )\n        time.sleep(10)\n    except client.exceptions.ApiException as\
+          \ e:\n        if e.status != 404:\n            raise\n\n    v1.create_namespaced_pod(namespace=namespace,\
           \ body=pod)\n    print(f\"Created pod {pod_name}\")\n\n    svc = client.V1Service(\n\
           \        metadata=client.V1ObjectMeta(\n            name=service_name,\n\
           \            namespace=namespace,\n            labels={\"app\": \"cosmos-transfer-nim\"\
@@ -730,7 +745,7 @@ root:
           parameters:
             gpu_product:
               runtimeValue:
-                constant: NVIDIA-L40S
+                constant: NVIDIA-H100-80GB-HBM3
             namespace:
               runtimeValue:
                 constant: isaac-mlops-poc

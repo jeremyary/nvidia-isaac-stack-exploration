@@ -54,3 +54,19 @@ spec:
   resources:
     requests:
       storage: {{ .Values.storage.tfrecords.size }}
+{{- if .Values.cosmosTransfer.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nim-cache
+  namespace: {{ include "isaac-mlops.namespace" . }}
+  labels:
+    {{- include "isaac-mlops.labels" . | nindent 4 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: {{ .Values.storage.storageClassName }}
+  resources:
+    requests:
+      storage: {{ .Values.storage.nimCache.size }}
+{{- end }}

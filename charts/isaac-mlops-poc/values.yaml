@@ -28,6 +28,8 @@ storage:
     size: 2Gi
   tfrecords:
     size: 2Gi
+  nimCache:
+    size: 50Gi
 
 # MinIO object storage (for DSPA + MLflow artifacts)
 minio:
@@ -157,6 +159,8 @@ cosmosTransfer:
   enabled: false
   image: nvcr.io/nim/nvidia/cosmos-transfer2.5-2b:1.0.0
   prepImage: quay.io/jary/cosmos-prep:latest
+  # NIM requires H100 80GB — FP8 calibration OOMs on L40S (48GB)
+  gpuProduct: NVIDIA-H100-80GB-HBM3
   clipLength: 25
   prompt: "Industrial warehouse, bright overhead fluorescent lighting, concrete floor"
   edgeWeight: 1.0
@@ -165,10 +169,10 @@ cosmosTransfer:
   resources:
     limits:
       gpu: 1
-      memory: 48Gi
+      memory: 80Gi
       cpu: "8"
     requests:
       gpu: 1
-      memory: 32Gi
+      memory: 64Gi
       cpu: "4"
   shmSize: 32Gi
